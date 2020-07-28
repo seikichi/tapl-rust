@@ -1,7 +1,16 @@
-#![feature(box_syntax, box_patterns)]
+extern crate nom;
+
 use std::rc::Rc;
 
-#[derive(Debug)]
+use nom::{
+    branch::alt,
+    bytes::complete::tag,
+    character::complete::{char, multispace0},
+    sequence::delimited,
+    IResult,
+};
+
+#[derive(Debug, PartialEq)]
 enum Term {
     True,
     False,
@@ -58,18 +67,103 @@ fn eval(t: Rc<Term>) -> Rc<Term> {
     return t;
 }
 
-fn main() {
-    let t = Rc::new(Term::IsZero(
-        Term::Pred(Term::Succ(Term::Succ(Term::Zero.into()).into()).into()).into(),
-    ));
-    // eval(IsZero(Pred(Succ(Succ(Zero))))) -> False
-    println!("eval({:?}) -> {:?}", t, eval(t.clone()));
+fn parse_constant(input: &str) -> IResult<&str, Rc<Term>> {
+    let (input, c) = delimited(
+        multispace0,
+        alt((tag("0"), tag("true"), tag("false"))),
+        multispace0,
+    )(input)?;
 
-    let t = Rc::new(Term::If(
-        Term::False.into(),
-        Term::True.into(),
-        Term::False.into(),
-    ));
-    // eval(If(False, True, False)) -> False
-    println!("eval({:?}) -> {:?}", t, eval(t.clone()));
+    let t = match c {
+        "true" => Term::True,
+        "false" => Term::False,
+        _ => Term::Zero,
+    };
+
+    Ok((input, t.into()))
+}
+
+fn parse_function(input: &str) -> IResult<&str, Rc<Term>> {
+    let (input, f) = delimited(
+        multispace0,
+        alt((tag("succ"), tag("pred"), tag("iszero"))),
+        multispace0,
+    )(input)?;
+
+    let (input, arg) = alt((parse_constant, delimited(char('('), parse_term, char(')'))))(input)?;
+    let t = match f {
+        "succ" => Term::Succ(arg),
+        "pred" => Term::Pred(arg),
+        _ => Term::IsZero(arg),
+    };
+    Ok((input, t.into()))
+}
+
+fn parse_if(input: &str) -> IResult<&str, Rc<Term>> {
+    let (input, _) = delimited(multispace0, tag("if"), multispace0)(input)?;
+    let (input, t1) = alt((parse_term, delimited(char('('), parse_term, char(')'))))(input)?;
+    let (input, _) = delimited(multispace0, tag("then"), multispace0)(input)?;
+    let (input, t2) = alt((parse_term, delimited(char('('), parse_term, char(')'))))(input)?;
+    let (input, _) = delimited(multispace0, tag("else"), multispace0)(input)?;
+    let (input, t3) = alt((parse_term, delimited(char('('), parse_term, char(')'))))(input)?;
+
+    Ok((input, Term::If(t1, t2, t3).into()))
+}
+
+fn parse_term(input: &str) -> IResult<&str, Rc<Term>> {
+    alt((parse_constant, parse_if, parse_function))(input)
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (_, term) = parse_term("iszero (pred (succ (succ 0)))")?;
+    println!("eval({:?}) -> {:?}", term, eval(term.clone()));
+
+    let (_, term) = parse_term("if false then true else false")?;
+    println!("eval({:?}) -> {:?}", term, eval(term.clone()));
+
+    Ok(())
+}
+
+#[test]
+fn test_parse() {
+    let tests: Vec<(&str, Rc<Term>)> = vec![
+        ("0", Term::Zero.into()),
+        ("succ 0", Term::Succ(Term::Zero.into()).into()),
+        (
+            "iszero (pred (succ 0))",
+            Term::IsZero(Term::Pred(Term::Succ(Term::Zero.into()).into()).into()).into(),
+        ),
+        (
+            "if false then true else false",
+            Term::If(Term::False.into(), Term::True.into(), Term::False.into()).into(),
+        ),
+        (
+            "if iszero (pred (succ 0)) then (if false then false else false) else false",
+            Term::If(
+                Term::IsZero(Term::Pred(Term::Succ(Term::Zero.into()).into()).into()).into(),
+                Term::If(Term::False.into(), Term::False.into(), Term::False.into()).into(),
+                Term::False.into(),
+            )
+            .into(),
+        ),
+    ];
+
+    for (input, expected) in tests {
+        let r = parse_term(input);
+        assert_eq!(r, Ok(("", expected)), "testing parse({})", input);
+    }
+}
+
+#[test]
+fn test_eval() {
+    let tests: Vec<(&str, Rc<Term>)> = vec![
+        ("0", Term::Zero.into()),
+        ("succ 0", Term::Succ(Term::Zero.into()).into()),
+        ("iszero (pred (succ 0))", Term::True.into()),
+    ];
+
+    for (input, expected) in tests {
+        let (_, term) = parse_term(input).unwrap();
+        assert_eq!(eval(term), expected, "testing eval(parse({}))", input);
+    }
 }
