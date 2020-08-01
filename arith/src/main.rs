@@ -1,6 +1,10 @@
+#![feature(test)]
+
 extern crate nom;
+extern crate test;
 
 use std::rc::Rc;
+use test::Bencher;
 
 use nom::{
     branch::alt,
@@ -12,7 +16,7 @@ use nom::{
 };
 
 #[derive(Debug, PartialEq)]
-enum Term {
+pub enum Term {
     True,
     False,
     If(Rc<Term>, Rc<Term>, Rc<Term>),
@@ -60,12 +64,44 @@ fn eval1(t: Rc<Term>) -> Option<Rc<Term>> {
     }
 }
 
-fn eval(t: Rc<Term>) -> Rc<Term> {
+pub fn eval(t: Rc<Term>) -> Rc<Term> {
     let mut t = t;
     while let Some(next) = eval1(t.clone()) {
         t = next;
     }
     return t;
+}
+
+// ex. 4.2.2 (?)
+pub fn eval_b(t: Rc<Term>) -> Rc<Term> {
+    match &*t {
+        Term::If(t1, t2, t3) => {
+            let v1 = eval_b(t1.clone());
+            match &*v1 {
+                Term::True => eval_b(t2.clone()).into(),
+                Term::False => eval_b(t3.clone()).into(),
+                _ => t,
+            }
+        }
+        Term::Succ(t1) => Term::Succ(eval_b(t1.clone())).into(),
+        Term::Pred(t1) => {
+            let v1 = eval_b(t1.clone());
+            match &*v1 {
+                Term::Zero => Term::Zero.into(),
+                Term::Succ(nv1) if is_numeric_val(nv1.clone()) => nv1.clone(),
+                _ => t,
+            }
+        }
+        Term::IsZero(t1) => {
+            let v1 = eval_b(t1.clone());
+            match &*v1 {
+                Term::Zero => Term::True.into(),
+                Term::Succ(nv1) if is_numeric_val(nv1.clone()) => Term::False.into(),
+                _ => t,
+            }
+        }
+        Term::Zero | Term::True | Term::False => t,
+    }
 }
 
 fn parse_atomic_term(input: &str) -> IResult<&str, Rc<Term>> {
@@ -102,7 +138,7 @@ fn parse_if(input: &str) -> IResult<&str, Rc<Term>> {
     )(input)
 }
 
-fn parse_term(input: &str) -> IResult<&str, Rc<Term>> {
+pub fn parse_term(input: &str) -> IResult<&str, Rc<Term>> {
     delimited(multispace0, alt((parse_app_term, parse_if)), multispace0)(input)
 }
 
@@ -152,10 +188,46 @@ fn test_eval() {
         ("0", Term::Zero.into()),
         ("succ 0", Term::Succ(Term::Zero.into()).into()),
         ("iszero (pred (succ 0))", Term::True.into()),
+        (
+            "if iszero (pred (succ 0)) then (if false then false else false) else false",
+            Term::False.into(),
+        ),
     ];
 
     for (input, expected) in tests {
         let (_, term) = parse_term(input).unwrap();
         assert_eq!(eval(term), expected, "testing eval(parse({}))", input);
     }
+}
+
+#[test]
+fn test_eval_b() {
+    let tests: Vec<(&str, Rc<Term>)> = vec![
+        ("0", Term::Zero.into()),
+        ("succ 0", Term::Succ(Term::Zero.into()).into()),
+        ("iszero (pred (succ 0))", Term::True.into()),
+        (
+            "if iszero (pred (succ 0)) then (if false then false else false) else false",
+            Term::False.into(),
+        ),
+    ];
+
+    for (input, expected) in tests {
+        let (_, term) = parse_term(input).unwrap();
+        assert_eq!(eval_b(term), expected, "testing eval(parse({}))", input);
+    }
+}
+
+#[bench]
+fn bench_eval(b: &mut Bencher) {
+    let input = "if iszero (pred (succ 0)) then (if false then false else false) else false";
+    let (_, term) = parse_term(input).unwrap();
+    b.iter(|| eval(term.clone()));
+}
+
+#[bench]
+fn bench_eval_b(b: &mut Bencher) {
+    let input = "if iszero (pred (succ 0)) then (if false then false else false) else false";
+    let (_, term) = parse_term(input).unwrap();
+    b.iter(|| eval_b(term.clone()));
 }
