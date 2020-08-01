@@ -6,7 +6,8 @@ use nom::{
     branch::alt,
     bytes::complete::tag,
     character::complete::{char, multispace0},
-    sequence::delimited,
+    combinator::map,
+    sequence::{delimited, pair, tuple},
     IResult,
 };
 
@@ -68,50 +69,48 @@ fn eval(t: Rc<Term>) -> Rc<Term> {
 }
 
 fn parse_constant(input: &str) -> IResult<&str, Rc<Term>> {
-    let (input, c) = delimited(
-        multispace0,
-        alt((tag("0"), tag("true"), tag("false"))),
-        multispace0,
-    )(input)?;
-
-    let t = match c {
-        "true" => Term::True,
-        "false" => Term::False,
-        _ => Term::Zero,
-    };
-
-    Ok((input, t.into()))
+    alt((
+        map(tag("0"), |_| Term::Zero.into()),
+        map(tag("true"), |_| Term::True.into()),
+        map(tag("false"), |_| Term::False.into()),
+    ))(input)
 }
 
 fn parse_function(input: &str) -> IResult<&str, Rc<Term>> {
-    let (input, f) = delimited(
-        multispace0,
-        alt((tag("succ"), tag("pred"), tag("iszero"))),
-        multispace0,
-    )(input)?;
-
-    let (input, arg) = alt((parse_constant, delimited(char('('), parse_term, char(')'))))(input)?;
-    let t = match f {
-        "succ" => Term::Succ(arg),
-        "pred" => Term::Pred(arg),
-        _ => Term::IsZero(arg),
-    };
-    Ok((input, t.into()))
+    alt((
+        map(pair(tag("succ"), parse_term), |(_, t)| Term::Succ(t).into()),
+        map(pair(tag("pred"), parse_term), |(_, t)| Term::Pred(t).into()),
+        map(pair(tag("iszero"), parse_term), |(_, t)| {
+            Term::IsZero(t).into()
+        }),
+    ))(input)
 }
 
 fn parse_if(input: &str) -> IResult<&str, Rc<Term>> {
-    let (input, _) = delimited(multispace0, tag("if"), multispace0)(input)?;
-    let (input, t1) = alt((parse_term, delimited(char('('), parse_term, char(')'))))(input)?;
-    let (input, _) = delimited(multispace0, tag("then"), multispace0)(input)?;
-    let (input, t2) = alt((parse_term, delimited(char('('), parse_term, char(')'))))(input)?;
-    let (input, _) = delimited(multispace0, tag("else"), multispace0)(input)?;
-    let (input, t3) = alt((parse_term, delimited(char('('), parse_term, char(')'))))(input)?;
-
-    Ok((input, Term::If(t1, t2, t3).into()))
+    map(
+        tuple((
+            tag("if"),
+            parse_term,
+            tag("then"),
+            parse_term,
+            tag("else"),
+            parse_term,
+        )),
+        |(_, t1, _, t2, _, t3)| Term::If(t1, t2, t3).into(),
+    )(input)
 }
 
 fn parse_term(input: &str) -> IResult<&str, Rc<Term>> {
-    alt((parse_constant, parse_if, parse_function))(input)
+    delimited(
+        multispace0,
+        alt((
+            parse_constant,
+            parse_if,
+            parse_function,
+            delimited(char('('), parse_term, char(')')),
+        )),
+        multispace0,
+    )(input)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
