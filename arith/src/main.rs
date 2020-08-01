@@ -68,16 +68,18 @@ fn eval(t: Rc<Term>) -> Rc<Term> {
     return t;
 }
 
-fn parse_constant(input: &str) -> IResult<&str, Rc<Term>> {
+fn parse_atomic_term(input: &str) -> IResult<&str, Rc<Term>> {
     alt((
+        delimited(char('('), parse_term, char(')')),
         map(tag("0"), |_| Term::Zero.into()),
         map(tag("true"), |_| Term::True.into()),
         map(tag("false"), |_| Term::False.into()),
     ))(input)
 }
 
-fn parse_function(input: &str) -> IResult<&str, Rc<Term>> {
+fn parse_app_term(input: &str) -> IResult<&str, Rc<Term>> {
     alt((
+        parse_atomic_term,
         map(pair(tag("succ"), parse_term), |(_, t)| Term::Succ(t).into()),
         map(pair(tag("pred"), parse_term), |(_, t)| Term::Pred(t).into()),
         map(pair(tag("iszero"), parse_term), |(_, t)| {
@@ -101,16 +103,7 @@ fn parse_if(input: &str) -> IResult<&str, Rc<Term>> {
 }
 
 fn parse_term(input: &str) -> IResult<&str, Rc<Term>> {
-    delimited(
-        multispace0,
-        alt((
-            parse_constant,
-            parse_if,
-            parse_function,
-            delimited(char('('), parse_term, char(')')),
-        )),
-        multispace0,
-    )(input)
+    delimited(multispace0, alt((parse_app_term, parse_if)), multispace0)(input)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
