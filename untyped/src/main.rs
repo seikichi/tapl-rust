@@ -1,12 +1,13 @@
+use std::borrow::Borrow;
 use std::rc::Rc;
 
 use nom::{
     branch::alt,
     bytes::complete::tag,
-    character::complete::{char, digit1, multispace0},
-    combinator::{map, map_opt},
-    multi::fold_many1,
-    sequence::{delimited, pair},
+    character::complete::{alphanumeric1, char, multispace0, multispace1},
+    combinator::{flat_map, map, map_opt},
+    multi::fold_many0,
+    sequence::{delimited, tuple},
     IResult,
 };
 
@@ -15,6 +16,35 @@ enum Term {
     Var(i32),
     Abs(Rc<Term>),
     App(Rc<Term>, Rc<Term>),
+}
+
+#[derive(Debug)]
+enum Context {
+    Cons(String, Rc<Context>),
+    Nil,
+}
+
+impl Context {
+    fn new() -> Rc<Self> {
+        Rc::new(Context::Nil)
+    }
+
+    fn with(self: &Rc<Context>, x: String) -> Rc<Self> {
+        Rc::new(Context::Cons(x, self.clone()))
+    }
+
+    fn index<T: Borrow<str>>(self: &Rc<Context>, x: T) -> Option<i32> {
+        let mut next = self.clone();
+        let mut i: i32 = 0;
+        while let Context::Cons(car, cdr) = &*next {
+            if car == x.borrow() {
+                return Some(i);
+            }
+            i += 1;
+            next = cdr.clone();
+        }
+        None
+    }
 }
 
 fn term_shift(d: i32, t: Rc<Term>) -> Rc<Term> {
@@ -75,89 +105,89 @@ fn eval(t: Rc<Term>) -> Rc<Term> {
     return t;
 }
 
-fn parse_atomic_term(input: &str) -> IResult<&str, Rc<Term>> {
-    delimited(
-        multispace0,
-        alt((
-            delimited(char('('), parse_term, char(')')),
-            map_opt(digit1, |d: &str| Some(Rc::new(Term::Var(d.parse().ok()?)))),
-        )),
-        multispace0,
-    )(input)
+fn term(c: Rc<Context>) -> impl Fn(&str) -> IResult<&str, Rc<Term>> {
+    move |input: &str| -> IResult<&str, Rc<Term>> {
+        delimited(
+            multispace0,
+            alt((app_term(c.clone()), lambda(c.clone()))),
+            multispace0,
+        )(input)
+    }
 }
 
-fn parse_app_term(input: &str) -> IResult<&str, Rc<Term>> {
-    fold_many1(
-        parse_atomic_term,
-        Term::Var(-1).into(),
-        |t1: Rc<Term>, t2| {
-            if let Term::Var(-1) = &*t1 {
-                return t2;
-            }
-            Term::App(t1, t2).into()
-        },
-    )(input)
+fn lambda(c: Rc<Context>) -> impl Fn(&str) -> IResult<&str, Rc<Term>> {
+    move |input: &str| -> IResult<&str, Rc<Term>> {
+        let (input, (_, _, s, _, _, _)) = tuple((
+            alt((tag("lambda"), tag("λ"))),
+            multispace1,
+            alphanumeric1,
+            multispace0,
+            char('.'),
+            multispace0,
+        ))(input)?;
+
+        map(term(c.with(s.into())), |t| Term::Abs(t).into())(input)
+    }
 }
 
-fn parse_lambda(input: &str) -> IResult<&str, Rc<Term>> {
-    map(
-        pair(alt((tag("lambda."), tag("λ."))), parse_term),
-        |(_, t)| Term::Abs(t).into(),
-    )(input)
+fn atomic_term(c: Rc<Context>) -> impl Fn(&str) -> IResult<&str, Rc<Term>> {
+    move |input: &str| -> IResult<&str, Rc<Term>> {
+        delimited(
+            multispace0,
+            alt((
+                delimited(char('('), term(c.clone()), char(')')),
+                map_opt(alphanumeric1, |s: &str| {
+                    Some(Rc::new(Term::Var(c.index(s)? as i32)))
+                }),
+            )),
+            multispace0,
+        )(input)
+    }
 }
 
-fn parse_term(input: &str) -> IResult<&str, Rc<Term>> {
-    delimited(
-        multispace0,
-        alt((parse_app_term, parse_lambda)),
-        multispace0,
-    )(input)
+fn app_term(c: Rc<Context>) -> impl Fn(&str) -> IResult<&str, Rc<Term>> {
+    move |input: &str| -> IResult<&str, Rc<Term>> {
+        flat_map(atomic_term(c.clone()), |t| {
+            fold_many0(atomic_term(c.clone()), t, |t1, t2| Term::App(t1, t2).into())
+        })(input)
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (_, term) = parse_term("(λ. 1 0 2) (λ. 0)")?;
-    let result = eval(term.clone());
-    println!("{:?} -> {:?}", term, result); // expect `0 (λ. 0) 1`
+    let (_, t) = term(Context::new())("(λ x.x) (λ x. x x)")?;
+    let result = eval(t.clone());
+    println!("{:?} -> {:?}", t, result);
+
+    let c = Context::new().with("z".into()).with("y".into());
+    let (_, t) = term(c)("(λ x. y x z) (λ x. x x)")?;
+    let result = eval(t.clone());
+    println!("{:?} -> {:?}", t, result); // expect `0 (λ. 0) 1`
 
     Ok(())
 }
 
 #[test]
-fn test_parse() {
-    let tests: Vec<(&str, Rc<Term>)> = vec![
-        ("0", Term::Var(0).into()),
-        ("λ. 0", Term::Abs(Term::Var(0).into()).into()),
+fn test_atomic_term() {
+    let tests: Vec<(&str, Rc<Context>, Rc<Term>)> = vec![
+        ("x", Context::new().with("x".into()), Term::Var(0).into()),
         (
-            "0 1",
-            Term::App(Term::Var(0).into(), Term::Var(1).into()).into(),
+            "λ x.x",
+            Context::new(),
+            Term::Abs(Term::Var(0).into()).into(),
         ),
         (
-            "0 1 2",
+            "(λ x.x) (λ x. x x)",
+            Context::new(),
             Term::App(
-                Term::App(Term::Var(0).into(), Term::Var(1).into()).into(),
-                Term::Var(2).into(),
-            )
-            .into(),
-        ),
-        (
-            "(λ. 1 0 2) (λ. 0)",
-            Term::App(
-                Term::Abs(
-                    Term::App(
-                        Term::App(Term::Var(1).into(), Term::Var(0).into()).into(),
-                        Term::Var(2).into(),
-                    )
-                    .into(),
-                )
-                .into(),
                 Term::Abs(Term::Var(0).into()).into(),
+                Term::Abs(Term::App(Term::Var(0).into(), Term::Var(0).into()).into()).into(),
             )
             .into(),
         ),
     ];
 
-    for (input, expected) in tests {
-        let r = parse_term(input);
+    for (input, context, expected) in tests {
+        let r = term(context)(input);
         assert_eq!(r, Ok(("", expected)), "testing parse({})", input);
     }
 }
