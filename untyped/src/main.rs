@@ -2,26 +2,9 @@ mod core;
 mod parser;
 mod syntax;
 
-use std::rc::Rc;
-
 use self::core::*;
 use parser::*;
 use syntax::*;
-
-fn print_term(t: Rc<Term>, c: Rc<Context>) -> String {
-    match &*t {
-        Term::Abs(x, t1) => {
-            let (c, x) = c.pick_fresh_name(x);
-            format!("(λ {}. {})", x, print_term(t1.clone(), c))
-        }
-        Term::App(t1, t2) => format!(
-            "({}. {})",
-            print_term(t1.clone(), c.clone()),
-            print_term(t2.clone(), c.clone())
-        ),
-        Term::Var(x) => c.name(*x).unwrap(),
-    }
-}
 
 fn process_command(commands: &[Command]) {
     let mut context = Context::new();
@@ -30,18 +13,13 @@ fn process_command(commands: &[Command]) {
             Command::Eval(t) => {
                 println!(
                     "{} -> {}",
-                    print_term(t.clone(), context.clone()),
-                    print_term(eval(t.clone(), context.clone()), context.clone())
+                    t.display(context.clone()),
+                    eval(t.clone(), context.clone()).display(context.clone()),
                 );
             }
             Command::Bind(s, b) => {
                 let b = eval_binding(b.clone(), context.clone());
-                match &b {
-                    Binding::Name => println!("{} /", s),
-                    Binding::Term(t) => {
-                        println!("{} = {}", s, print_term(t.clone(), context.clone()))
-                    }
-                }
+                println!("{}{}", s, b.display(context.clone()));
                 context = context.with_binding(s.clone(), b);
             }
         }

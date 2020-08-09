@@ -1,4 +1,5 @@
 use std::borrow::Borrow;
+use std::fmt;
 use std::rc::Rc;
 
 #[derive(Debug, PartialEq)]
@@ -20,12 +21,28 @@ impl Term {
     pub fn app(t1: Rc<Term>, t2: Rc<Term>) -> Rc<Term> {
         Rc::new(Term::App(t1, t2))
     }
+
+    pub fn display(self: &Rc<Term>, c: Rc<Context>) -> TermDisplay {
+        TermDisplay {
+            term: self.clone(),
+            context: c,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Binding {
     Name,
     Term(Rc<Term>),
+}
+
+impl Binding {
+    pub fn display(&self, c: Rc<Context>) -> BindingDisplay {
+        BindingDisplay {
+            binding: self.clone(),
+            context: c,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -141,4 +158,63 @@ pub fn term_subst(j: i32, s: Rc<Term>, t: Rc<Term>) -> Rc<Term> {
 
 pub fn term_subst_top(s: Rc<Term>, t: Rc<Term>) -> Rc<Term> {
     term_shift(-1, term_subst(0, term_shift(1, s), t))
+}
+
+pub struct TermDisplay {
+    term: Rc<Term>,
+    context: Rc<Context>,
+}
+
+impl fmt::Display for TermDisplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.format(f)
+    }
+}
+
+impl TermDisplay {
+    fn format(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &*self.term {
+            Term::Abs(x, t1) => {
+                let (c, x) = self.context.pick_fresh_name(x);
+                write!(f, "λ {}. ", x)?;
+                t1.display(c).format(f)
+            }
+            _ => self.format_app_term(f),
+        }
+    }
+
+    fn format_app_term(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &*self.term {
+            Term::App(t1, t2) => {
+                t1.display(self.context.clone()).format_app_term(f)?;
+                write!(f, " ")?;
+                t2.display(self.context.clone()).format_atomic_term(f)
+            }
+            _ => self.format_atomic_term(f),
+        }
+    }
+
+    fn format_atomic_term(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &*self.term {
+            Term::Var(x) => write!(f, "{}", self.context.name(*x).unwrap()),
+            _ => self.format(f),
+        }
+    }
+}
+
+pub struct BindingDisplay {
+    binding: Binding,
+    context: Rc<Context>,
+}
+
+impl fmt::Display for BindingDisplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.binding {
+            Binding::Name => Ok(()),
+            Binding::Term(t) => {
+                write!(f, " = ")?;
+                t.display(self.context.clone()).format(f)
+            }
+        }
+    }
 }
