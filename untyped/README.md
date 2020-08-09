@@ -14,8 +14,11 @@
 > two = λ s. λ z. s s z
 > three = λ s. λ z. s s s z
 > four = λ s. λ z. s s s s z
+> five  = λ s. λ z. s (s (s (s (s z))));
+> six   = λ s. λ z. s (s (s (s (s (s z)))));
 > iszro = λ m. m λ x. fls tru
 > plus = λ m. λ n. λ s. λ z. m s n s z
+> times = λ m. λ n. λ s. m (n s);
 > zz = λ b. b λ s. λ z. z λ s. λ z. z
 > ss = λ p. pair snd p plus one snd p
 > prd = λ m. fst m ss zz
@@ -24,4 +27,9 @@
 λ t. λ f. t
 > equal plus two two three
 λ t. λ f. f
+> fix = λ f. (λ x. f (λ y. x x y)) (λ x. f (λ y. x x y));
+> ff = λ f. λ n. test (iszro n) (λ x. one) (λ x. (times n (f (prd n)))) zero;
+> factorial = fix ff;
+> equal six (factorial three);
+λ t. λ f. t
 ```
