@@ -14,7 +14,14 @@ fn process_command(commands: &[Command]) {
     for c in commands {
         match c {
             Command::Eval(t) => {
-                println!("> {:?}\n{:?}", t, eval(t.clone(), &mut context),);
+                let tn = eval(t.clone(), &mut context);
+                let ty = type_of(&tn, &mut context).unwrap();
+                println!(
+                    "> {}\n{}: {:?}",
+                    t.display(&context),
+                    tn.display(&context),
+                    ty
+                );
             }
             Command::Bind(s, b) => {
                 println!("> {}: {:?}", s, b);

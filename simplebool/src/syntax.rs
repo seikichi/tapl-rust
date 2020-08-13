@@ -1,3 +1,4 @@
+use std::fmt;
 use std::rc::Rc;
 
 #[derive(Debug, PartialEq)]
@@ -28,7 +29,7 @@ pub enum Command {
     Bind(String, Binding),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Context {
     bindings: Vec<(String, Binding)>,
 }
@@ -80,6 +81,13 @@ impl Term {
     pub fn subst_top(self: &Rc<Term>, s: Rc<Term>) -> Rc<Term> {
         self.subst(0, s.shift(1)).shift(-1)
     }
+
+    pub fn display(self: &Rc<Term>, c: &Context) -> TermDisplay {
+        TermDisplay {
+            term: self.clone(),
+            context: (*c).clone(),
+        }
+    }
 }
 
 impl Context {
@@ -102,6 +110,10 @@ impl Context {
         self.bindings.push((x, b));
     }
 
+    pub fn add_name(&mut self, x: String) {
+        self.add_binding(x, Binding::Name);
+    }
+
     pub fn get_name(&self, index: i32) -> Option<&String> {
         let index = self.bindings.len() - (index as usize) - 1;
         self.bindings.get(index).map(|(x, _)| x)
@@ -117,7 +129,7 @@ impl Context {
             .iter()
             .rev()
             .position(|(s, _)| s == x)
-            .map(|i| (self.bindings.len() - i - 1) as i32)
+            .map(|i| i as i32)
     }
 
     pub fn get_type(&self, index: i32) -> Option<&Rc<Type>> {
@@ -127,15 +139,73 @@ impl Context {
         }
     }
 
-    pub fn with_fresh_name<R, F: FnOnce(&mut Self) -> R>(&mut self, x: String, f: F) -> R {
+    pub fn add_fresh_name(&mut self, x: String) -> String {
         let mut name: String = x;
         while self.is_name_bound(&name) {
             name.push_str("'");
         }
-        self.with_name(name, f)
+        self.add_name(name.clone());
+        name
     }
 
     fn is_name_bound(&self, x: &str) -> bool {
         self.bindings.iter().rev().any(|(s, _)| s == x)
+    }
+}
+
+pub struct TermDisplay {
+    term: Rc<Term>,
+    context: Context,
+}
+
+impl fmt::Display for TermDisplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.format(f)
+    }
+}
+
+impl TermDisplay {
+    fn format(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &*self.term {
+            Term::Abs(x, _ty, t1) => {
+                let mut c = self.context.clone();
+                let x = c.add_fresh_name(x.clone());
+                write!(f, "λ {}. ", x)?;
+                t1.display(&c).format(f)
+            }
+            Term::If(t1, t2, t3) => {
+                write!(f, "if ")?;
+                t1.display(&self.context).format(f)?;
+                write!(f, " then ")?;
+                t2.display(&self.context).format(f)?;
+                write!(f, " else ")?;
+                t3.display(&self.context).format(f)
+            }
+            _ => self.format_app_term(f),
+        }
+    }
+
+    fn format_app_term(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &*self.term {
+            Term::App(t1, t2) => {
+                t1.display(&self.context).format_app_term(f)?;
+                write!(f, " ")?;
+                t2.display(&self.context).format_atomic_term(f)
+            }
+            _ => self.format_atomic_term(f),
+        }
+    }
+
+    fn format_atomic_term(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &*self.term {
+            Term::Var(x) => write!(f, "{}", self.context.get_name(*x).unwrap()),
+            Term::True => write!(f, "true"),
+            Term::False => write!(f, "false"),
+            _ => {
+                write!(f, "(")?;
+                self.format(f)?;
+                write!(f, ")")
+            }
+        }
     }
 }

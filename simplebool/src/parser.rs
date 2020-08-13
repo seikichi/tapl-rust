@@ -27,13 +27,12 @@ impl Parser {
     }
 
     fn get_index(&self, x: &str) -> Option<i32> {
-        let len = self.bindings.borrow().len();
         self.bindings
             .borrow()
             .iter()
             .rev()
             .position(|s| x == s)
-            .map(|i| (len - i - 1) as i32)
+            .map(|i| i as i32)
     }
 
     fn with_name<R, F: FnOnce() -> R>(&self, x: String, f: F) -> R {
@@ -213,7 +212,7 @@ fn test_parser() {
                     Term::Abs(
                         "y".into(),
                         Type::Arrow(Type::Bool.into(), Type::Bool.into()).into(),
-                        Term::App(Term::Var(1).into(), Term::Var(0).into()).into(),
+                        Term::App(Term::Var(0).into(), Term::Var(1).into()).into(),
                     )
                     .into(),
                 ),
