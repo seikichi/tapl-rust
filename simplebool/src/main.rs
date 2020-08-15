@@ -289,7 +289,9 @@ mod parser {
     use nom::{
         branch::alt,
         bytes::complete::tag,
-        character::complete::{alpha1, alphanumeric0, char, multispace0, multispace1},
+        character::complete::{
+            alpha1, alphanumeric0, char, multispace0 as ms0, multispace1 as ms1,
+        },
         combinator::{map, verify},
         multi::{separated_list, separated_nonempty_list},
         sequence::{delimited, pair, preceded, tuple},
@@ -299,8 +301,7 @@ mod parser {
     type ParseResult<T> = Box<dyn Fn(&Context) -> T>;
 
     pub fn parse(input: &str) -> IResult<&str, Vec<Command>> {
-        let (input, fs) =
-            separated_list(delimited(multispace0, char(';'), multispace0), command)(input)?;
+        let (input, fs) = separated_list(pair(ms0, char(';')), command)(input)?;
 
         let mut ctx = Context::new();
         let mut commands = vec![];
@@ -317,7 +318,7 @@ mod parser {
     fn command(input: &str) -> IResult<&str, ParseResult<(Command, Context)>> {
         alt((
             map(
-                pair(preceded(multispace0, identifier), binder),
+                pair(preceded(ms0, identifier), binder),
                 |(id, f)| -> ParseResult<_> {
                     box move |ctx| (Bind(id.clone(), f(ctx)), ctx.add_name(id.clone()))
                 },
@@ -330,25 +331,25 @@ mod parser {
 
     fn binder(input: &str) -> IResult<&str, ParseResult<Binding>> {
         map(
-            preceded(tuple((multispace0, char(':'), multispace0)), all_type),
+            preceded(tuple((ms0, char(':'), ms0)), all_type),
             |f| -> ParseResult<_> { box move |ctx| VarBind(f(ctx)) },
         )(input)
     }
 
     fn all_type(input: &str) -> IResult<&str, ParseResult<Ty>> {
-        preceded(multispace0, arrow_type)(input)
+        preceded(ms0, arrow_type)(input)
     }
 
     fn atomic_type(input: &str) -> IResult<&str, ParseResult<Ty>> {
         alt((
             map(tag("Bool"), |_| -> ParseResult<_> { box |_ctx| TyBool }),
-            preceded(multispace0, delimited(char('('), all_type, char(')'))),
+            preceded(ms0, delimited(char('('), all_type, char(')'))),
         ))(input)
     }
 
     fn arrow_type(input: &str) -> IResult<&str, ParseResult<Ty>> {
         map(
-            separated_nonempty_list(delimited(multispace0, tag("->"), multispace0), atomic_type),
+            separated_nonempty_list(pair(ms0, tag("->")), atomic_type),
             |fs| {
                 let mut it = fs.into_iter().rev();
                 let f = it.next().unwrap();
@@ -358,17 +359,17 @@ mod parser {
     }
 
     pub fn term(input: &str) -> IResult<&str, ParseResult<Term>> {
-        preceded(multispace0, alt((if_term, lambda, app_term)))(input)
+        alt((if_term, lambda, app_term))(input)
     }
 
     fn lambda(input: &str) -> IResult<&str, ParseResult<Term>> {
         map(
             tuple((
-                alt((tag("lambda"), tag("λ"))),
-                delimited(multispace1, identifier, multispace0),
-                char(':'),
-                delimited(multispace0, all_type, multispace0),
-                char('.'),
+                preceded(ms0, alt((tag("lambda"), tag("λ")))),
+                preceded(ms1, identifier),
+                preceded(ms0, char(':')),
+                all_type,
+                preceded(ms0, char('.')),
                 term,
             )),
             |(_, s, _, tyf, _, tf)| -> ParseResult<_> {
@@ -383,11 +384,11 @@ mod parser {
     fn if_term(input: &str) -> IResult<&str, ParseResult<Term>> {
         map(
             tuple((
-                tag("if"),
+                preceded(ms0, tag("if")),
                 term,
-                preceded(multispace1, tag("then")),
+                preceded(ms1, tag("then")),
                 term,
-                preceded(multispace1, tag("else")),
+                preceded(ms1, tag("else")),
                 term,
             )),
             |(_, f1, _, f2, _, f3)| -> ParseResult<_> {
@@ -397,7 +398,7 @@ mod parser {
     }
 
     fn app_term(input: &str) -> IResult<&str, ParseResult<Term>> {
-        map(separated_nonempty_list(multispace1, atomic_term), |fs| {
+        map(separated_nonempty_list(ms1, atomic_term), |fs| {
             let mut it = fs.into_iter();
             let f = it.next().unwrap();
             it.fold(f, |f1, f2| box move |ctx| TmApp(box f1(ctx), box f2(ctx)))
@@ -405,14 +406,17 @@ mod parser {
     }
 
     fn atomic_term(input: &str) -> IResult<&str, ParseResult<Term>> {
-        alt((
-            map(tag("true"), |_| -> ParseResult<_> { box |_| TmTrue }),
-            map(tag("false"), |_| -> ParseResult<_> { box |_| TmFalse }),
-            map(identifier, |s| -> ParseResult<_> {
-                box move |ctx| TmVar(ctx.name2index(&s).unwrap())
-            }),
-            delimited(char('('), term, char(')')),
-        ))(input)
+        preceded(
+            ms0,
+            alt((
+                map(tag("true"), |_| -> ParseResult<_> { box |_| TmTrue }),
+                map(tag("false"), |_| -> ParseResult<_> { box |_| TmFalse }),
+                map(identifier, |s| -> ParseResult<_> {
+                    box move |ctx| TmVar(ctx.name2index(&s).unwrap())
+                }),
+                delimited(char('('), term, char(')')),
+            )),
+        )(input)
     }
 
     const RESERVED_KEYWORDS: &'static [&'static str] = &["true", "false", "if", "then", "else"];
