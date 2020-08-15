@@ -501,7 +501,7 @@ mod parser {
     }
 
     pub fn term(input: &str) -> IResult<&str, ParseResult<Term>> {
-        alt((if_term, lambda, let_term, app_term))(input)
+        alt((if_term, lambda, let_term, letrec_term, app_term))(input)
     }
 
     fn lambda(input: &str) -> IResult<&str, ParseResult<Term>> {
@@ -538,6 +538,33 @@ mod parser {
                 box move |ctx| {
                     let t1 = f1(ctx);
                     ctx.with_name(s.clone(), |ctx| TmLet(s.clone(), box t1, box f2(ctx)))
+                }
+            },
+        )(input)
+    }
+
+    fn letrec_term(input: &str) -> IResult<&str, ParseResult<Term>> {
+        map(
+            tuple((
+                preceded(ms0, tag("letrec")),
+                preceded(ms1, identifier),
+                preceded(ms0, char(':')),
+                preceded(ms0, all_type),
+                preceded(ms0, char('=')),
+                term,
+                preceded(ms1, tag("in")),
+                preceded(ms1, term),
+            )),
+            |(_, s, _, fty, _, f1, _, f2)| -> ParseResult<_> {
+                box move |ctx| {
+                    let ty = fty(ctx);
+                    ctx.with_name(s.clone(), |ctx| {
+                        TmLet(
+                            s.clone(),
+                            box TmFix(box TmAbs(s.clone(), ty, box f1(ctx))),
+                            box f2(ctx),
+                        )
+                    })
                 }
             },
         )(input)
@@ -659,6 +686,23 @@ fn test() {
             "42",
             "Nat",
         ),
+        // Letrec
+        (
+            "
+            letrec plus: Nat -> Nat -> Nat =
+              λ m: Nat. λ n: Nat.
+                if iszero m then n else succ (plus (pred m) n) in
+            letrec times: Nat -> Nat -> Nat =
+              λ m: Nat. λ n: Nat.
+                if iszero m then 0 else plus n (times (pred m) n) in
+            letrec factorial: Nat -> Nat =
+              λ m: Nat.
+                if iszero m then 1 else times m (factorial (pred m)) in
+            factorial 5
+            ",
+            "120",
+            "Nat",
+        )
     ];
 
     for (input, expect_term, expect_ty) in testcases {
