@@ -9,6 +9,7 @@ pub enum Ty {
     TyArr(Box<Ty>, Box<Ty>),
     TyBool,
     TyNat,
+    TyUnit,
 }
 
 #[derive(Debug, Clone)]
@@ -24,6 +25,8 @@ pub enum Term {
     TmSucc(Box<Term>),
     TmPred(Box<Term>),
     TmIsZero(Box<Term>),
+    // Unit
+    TmUnit,
     // Extension
     TmLet(String, Box<Term>, Box<Term>),
     TmFix(Box<Term>),
@@ -124,6 +127,8 @@ impl Term {
             TmSucc(t1) => TmSucc(box t1.map(c, onvar)),
             TmPred(t1) => TmPred(box t1.map(c, onvar)),
             TmIsZero(t1) => TmIsZero(box t1.map(c, onvar)),
+            // Unit
+            TmUnit => TmUnit,
             // Extension
             TmLet(x, t1, t2) => TmLet(x.clone(), box t1.map(c, onvar), box t2.map(c + 1, onvar)),
             TmFix(t1) => TmFix(box t1.map(c, onvar)),
@@ -162,7 +167,7 @@ impl Term {
 
     fn is_val(&self, ctx: &Context) -> bool {
         match self {
-            TmTrue | TmFalse | TmAbs(_, _, _) => true,
+            TmTrue | TmFalse | TmAbs(_, _, _) | TmUnit => true,
             _ if self.is_numeric_val(ctx) => true,
             _ => false,
         }
@@ -255,6 +260,8 @@ impl Term {
                 }
                 panic!("guard of conditional not a boolean");
             }
+            // Unit
+            TmUnit => TyUnit,
             // Nat
             TmZero => TyNat,
             TmSucc(t1) => {
@@ -345,6 +352,7 @@ impl Term {
             TmVar(x) => write!(f, "{}", ctx.index2name(*x)),
             TmTrue => write!(f, "true"),
             TmFalse => write!(f, "false"),
+            TmUnit => write!(f, "unit"),
             TmZero => write!(f, "0"),
             TmSucc(t1) => {
                 let mut t = t1;
@@ -396,6 +404,7 @@ impl Ty {
     fn format_atomic_ty(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TyBool => write!(f, "Bool"),
+            TyUnit => write!(f, "Unit"),
             TyNat => write!(f, "Nat"),
             TyArr(_, _) => {
                 write!(f, "(")?;
@@ -481,6 +490,9 @@ mod parser {
         alt((
             map(preceded(ms0, tag("Bool")), |_| -> ParseResult<_> {
                 box |_ctx| TyBool
+            }),
+            map(preceded(ms0, tag("Unit")), |_| -> ParseResult<_> {
+                box |_ctx| TyUnit
             }),
             map(preceded(ms0, tag("Nat")), |_| -> ParseResult<_> {
                 box |_ctx| TyNat
@@ -622,6 +634,7 @@ mod parser {
             alt((
                 map(tag("true"), |_| -> ParseResult<_> { box |_| TmTrue }),
                 map(tag("false"), |_| -> ParseResult<_> { box |_| TmFalse }),
+                map(tag("unit"), |_| -> ParseResult<_> { box |_| TmUnit }),
                 map(identifier, |s| -> ParseResult<_> {
                     box move |ctx| TmVar(ctx.name2index(&s).unwrap())
                 }),
@@ -641,7 +654,7 @@ mod parser {
     }
 
     const RESERVED_KEYWORDS: &'static [&'static str] = &[
-        "true", "false", "if", "then", "else", "succ", "pred", "iszero", "let", "in", "fix",
+        "true", "false", "if", "then", "else", "succ", "pred", "iszero", "let", "in", "fix", "unit",
     ];
 
     fn identifier(input: &str) -> IResult<&str, String> {
@@ -664,7 +677,7 @@ fn test() {
         // Bool,
         ("true", "true", "Bool"),
         (
-            "(λ x:Bool->Bool. if x true then true else false) (λ x:Bool. x)",
+            "(λ x: Bool -> Bool. if x true then true else false) (λ x: Bool. x)",
             "true",
             "Bool",
         ),
@@ -673,13 +686,17 @@ fn test() {
             "true",
             "Bool",
         ),
+        // Unit
+        ("unit", "unit", "Unit"),
+        ("λ x: Bool. unit", "λ x: Bool. unit", "Bool -> Unit"),
+        ("(λ x: Bool. unit) true", "unit", "Unit"),
         // Nat
-        ("(λ x:Nat. succ x) 41", "42", "Nat"),
-        ("(λ x:Nat. if iszero x then 42 else 0) 0", "42", "Nat"),
-        ("(λ x:Nat. if iszero x then 42 else 0) 1", "0", "Nat"),
+        ("(λ x: Nat. succ x) 41", "42", "Nat"),
+        ("(λ x: Nat. if iszero x then 42 else 0) 0", "42", "Nat"),
+        ("(λ x: Nat. if iszero x then 42 else 0) 1", "0", "Nat"),
         // Let
         ("let x=true in x", "true", "Bool"),
-        ("let x=0 in let f=λ x:Nat. succ x in f x", "1", "Nat"),
+        ("let x=0 in let f=λ x: Nat. succ x in f x", "1", "Nat"),
         // Fix
         (
             "(fix (λ f: Nat -> Nat -> Nat. λ m: Nat. λ n: Nat. if iszero m then n else succ (f (pred m) n))) 40 2",
