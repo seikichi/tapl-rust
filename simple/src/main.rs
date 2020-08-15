@@ -628,6 +628,25 @@ mod parser {
         ))(input)
     }
 
+    fn term_seq(input: &str) -> IResult<&str, ParseResult<Term>> {
+        map(separated_nonempty_list(pair(ms0, char(';')), term), |fs| {
+            let mut it = fs.into_iter().rev();
+            let f = it.next().unwrap();
+            it.fold(f, |f1, f2| {
+                box move |ctx| {
+                    TmApp(
+                        box TmAbs(
+                            "_".into(),
+                            TyUnit,
+                            ctx.with_name("_".into(), |ctx| box f1(ctx)),
+                        ),
+                        box f2(ctx),
+                    )
+                }
+            })
+        })(input)
+    }
+
     fn atomic_term(input: &str) -> IResult<&str, ParseResult<Term>> {
         preceded(
             ms0,
@@ -638,7 +657,7 @@ mod parser {
                 map(identifier, |s| -> ParseResult<_> {
                     box move |ctx| TmVar(ctx.name2index(&s).unwrap())
                 }),
-                delimited(char('('), term, char(')')),
+                delimited(char('('), term_seq, char(')')),
                 // Nat
                 map(int_value, |n| -> ParseResult<_> {
                     box move |_| {
@@ -690,6 +709,9 @@ fn test() {
         ("unit", "unit", "Unit"),
         ("λ x: Bool. unit", "λ x: Bool. unit", "Bool -> Unit"),
         ("(λ x: Bool. unit) true", "unit", "Unit"),
+        // Seq
+        ("(unit; 42)", "42", "Nat"),
+        ("λ x: Bool. (unit; 42)", "λ x: Bool. (λ _: Unit. 42) unit", "Bool -> Nat"),
         // Nat
         ("(λ x: Nat. succ x) 41", "42", "Nat"),
         ("(λ x: Nat. if iszero x then 42 else 0) 0", "42", "Nat"),
