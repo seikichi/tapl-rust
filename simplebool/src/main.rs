@@ -1,6 +1,8 @@
 #![feature(box_syntax, box_patterns)]
 
+use std::env;
 use std::fmt;
+use std::fs;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ty {
@@ -167,9 +169,9 @@ impl Term {
                         if ty2 == *ty11 {
                             return *ty12;
                         }
-                        panic!("parameter type mismatch");
+                        panic!("parameter type mismatch: {}, {}", ty2, *ty11);
                     }
-                    _ => panic!("arrow type expected"),
+                    _ => panic!("arrow type expected: {}", ty1),
                 }
             }
             TmTrue | TmFalse => TyBool,
@@ -240,9 +242,9 @@ impl Ty {
     fn format_arr_ty(&self, ctx: &Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TyArr(t1, t2) => {
-                t1.format_arr_ty(ctx, f)?;
+                t1.format_atomic_ty(ctx, f)?;
                 write!(f, " -> ")?;
-                t2.format_atomic_ty(ctx, f)
+                t2.format_arr_ty(ctx, f)
             }
             _ => self.format_atomic_ty(ctx, f),
         }
@@ -269,6 +271,15 @@ impl fmt::Display for Term {
 impl fmt::Display for Ty {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.format(&Context::new(), f)
+    }
+}
+
+impl fmt::Display for Binding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NameBind => Ok(()),
+            VarBind(ty) => write!(f, ": {}", ty),
+        }
     }
 }
 
@@ -305,15 +316,15 @@ mod parser {
 
     fn command(input: &str) -> IResult<&str, ParseResult<(Command, Context)>> {
         alt((
-            map(term, |f| -> ParseResult<_> {
-                box move |ctx| (Eval(f(ctx)), (*ctx).clone())
-            }),
             map(
                 pair(preceded(multispace0, identifier), binder),
                 |(id, f)| -> ParseResult<_> {
                     box move |ctx| (Bind(id.clone(), f(ctx)), ctx.add_name(id.clone()))
                 },
             ),
+            map(term, |f| -> ParseResult<_> {
+                box move |ctx| (Eval(f(ctx)), (*ctx).clone())
+            }),
         ))(input)
     }
 
@@ -339,9 +350,9 @@ mod parser {
         map(
             separated_nonempty_list(delimited(multispace0, tag("->"), multispace0), atomic_type),
             |fs| {
-                let mut it = fs.into_iter();
+                let mut it = fs.into_iter().rev();
                 let f = it.next().unwrap();
-                it.fold(f, |f1, f2| box move |ctx| TyArr(box f1(ctx), box f2(ctx)))
+                it.fold(f, |f1, f2| box move |ctx| TyArr(box f2(ctx), box f1(ctx)))
             },
         )(input)
     }
@@ -371,7 +382,14 @@ mod parser {
 
     fn if_term(input: &str) -> IResult<&str, ParseResult<Term>> {
         map(
-            tuple((tag("if"), term, tag("then"), term, tag("else"), term)),
+            tuple((
+                tag("if"),
+                term,
+                preceded(multispace1, tag("then")),
+                term,
+                preceded(multispace1, tag("else")),
+                term,
+            )),
             |(_, f1, _, f2, _, f3)| -> ParseResult<_> {
                 box move |ctx| TmIf(box f1(ctx), box f2(ctx), box f3(ctx))
             },
@@ -409,11 +427,28 @@ mod parser {
     }
 }
 
-fn main() {
-    let (_, commands) = parser::parse("(λ x:Bool -> Bool. x true) (λ x:Bool. x)").unwrap();
-    let c = Context::new();
-    if let Some(Eval(t)) = commands.get(0) {
-        println!("{}: {}", t, t.ty(&c));
-        println!("{} -> {}", t, t.eval(&c));
+fn process_command(commands: &[Command]) {
+    let mut ctx = Context::new();
+    for c in commands {
+        match c {
+            Command::Eval(t) => {
+                println!("> {}\n{} : {}", t, t.eval(&ctx), t.ty(&ctx));
+            }
+            Command::Bind(s, b) => {
+                println!("> {} {}", s, b);
+                ctx = ctx.add_binding(s.clone(), b.clone());
+            }
+        }
     }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = env::args().collect();
+    let filename = &args[1];
+    let code = fs::read_to_string(filename)?;
+    let (_, commands) = parser::parse(&code).unwrap();
+
+    process_command(&commands);
+
+    Ok(())
 }
