@@ -24,6 +24,8 @@ pub enum Term {
     TmSucc(Box<Term>),
     TmPred(Box<Term>),
     TmIsZero(Box<Term>),
+    // Extension
+    TmLet(String, Box<Term>, Box<Term>),
 }
 
 #[derive(Debug)]
@@ -121,6 +123,8 @@ impl Term {
             TmSucc(t1) => TmSucc(box t1.map(c, onvar)),
             TmPred(t1) => TmPred(box t1.map(c, onvar)),
             TmIsZero(t1) => TmIsZero(box t1.map(c, onvar)),
+            // Extension
+            TmLet(x, t1, t2) => TmLet(x.clone(), box t1.map(c, onvar), box t2.map(c + 1, onvar)),
         }
     }
 
@@ -178,6 +182,10 @@ impl Term {
             TmIsZero(box TmZero) => Some(TmTrue),
             TmIsZero(box TmSucc(nv1)) if nv1.is_numeric_val(ctx) => Some(TmFalse),
             TmIsZero(t1) => Some(TmIsZero(box t1.eval1(ctx)?)),
+            // Extension
+            TmLet(_, v1, t2) if v1.is_val(ctx) => Some(t2.subst_top(v1)),
+            TmLet(x, t1, t2) => Some(TmLet(x.clone(), box t1.eval(ctx), t2.clone())),
+            // Other
             _ => None,
         }
     }
@@ -263,6 +271,11 @@ impl Term {
                 }
                 panic!("argument of succ is not a number");
             }
+            // Extension
+            TmLet(x, t1, t2) => {
+                let ty1 = t1.ty(ctx);
+                ctx.with_binding(x.clone(), VarBind(ty1), |ctx| t2.ty(ctx))
+            }
         }
     }
 
@@ -279,6 +292,12 @@ impl Term {
                 t2.format(ctx, f)?;
                 write!(f, " else ")?;
                 t3.format(ctx, f)
+            }
+            TmLet(x, t1, t2) => {
+                write!(f, "let {} = ", x)?;
+                t1.format(ctx, f)?;
+                write!(f, " in ")?;
+                t2.format(ctx, f)
             }
             _ => self.format_app_term(ctx, f),
         }
@@ -461,7 +480,7 @@ mod parser {
     }
 
     pub fn term(input: &str) -> IResult<&str, ParseResult<Term>> {
-        alt((if_term, lambda, app_term))(input)
+        alt((if_term, lambda, let_term, app_term))(input)
     }
 
     fn lambda(input: &str) -> IResult<&str, ParseResult<Term>> {
@@ -479,6 +498,25 @@ mod parser {
                     ctx.with_name(s.clone(), |mut ctx| {
                         TmAbs(s.clone(), tyf(&mut ctx), box tf(&mut ctx))
                     })
+                }
+            },
+        )(input)
+    }
+
+    fn let_term(input: &str) -> IResult<&str, ParseResult<Term>> {
+        map(
+            tuple((
+                preceded(ms0, tag("let")),
+                preceded(ms1, identifier),
+                preceded(ms0, char('=')),
+                term,
+                preceded(ms1, tag("in")),
+                preceded(ms1, term),
+            )),
+            |(_, s, _, f1, _, f2)| -> ParseResult<_> {
+                box move |ctx| {
+                    let t1 = f1(ctx);
+                    ctx.with_name(s.clone(), |ctx| TmLet(s.clone(), box t1, box f2(ctx)))
                 }
             },
         )(input)
@@ -551,7 +589,7 @@ mod parser {
     }
 
     const RESERVED_KEYWORDS: &'static [&'static str] = &[
-        "true", "false", "if", "then", "else", "succ", "pred", "iszero",
+        "true", "false", "if", "then", "else", "succ", "pred", "iszero", "let", "in",
     ];
 
     fn identifier(input: &str) -> IResult<&str, String> {
@@ -572,18 +610,22 @@ mod parser {
 fn test() {
     let testcases = vec![
         // Bool,
-        ("true", "true"),
+        ("true", "true", "Bool"),
         (
             "(λ x:Bool->Bool. if x true then true else false) (λ x:Bool. x)",
             "true",
+            "Bool",
         ),
         // Nat
-        ("(λ x:Nat. succ x) 41", "42"),
-        ("(λ x:Nat. if iszero x then 42 else 0) 0", "42"),
-        ("(λ x:Nat. if iszero x then 42 else 0) 1", "0"),
+        ("(λ x:Nat. succ x) 41", "42", "Nat"),
+        ("(λ x:Nat. if iszero x then 42 else 0) 0", "42", "Nat"),
+        ("(λ x:Nat. if iszero x then 42 else 0) 1", "0", "Nat"),
+        // Let
+        ("let x=true in x", "true", "Bool"),
+        ("let x=0 in let f=λ x:Nat. succ x in f x", "1", "Nat"),
     ];
 
-    for (input, expect) in testcases {
+    for (input, expect_term, expect_ty) in testcases {
         let (_, commands) = parser::parse(input).unwrap();
 
         let mut ctx = Context::new();
@@ -595,7 +637,9 @@ fn test() {
             }
         }
 
-        assert_eq!(expect, format!("{}", result.unwrap()));
+        let t = result.unwrap();
+        assert_eq!(expect_term, format!("{}", t), "{}", input);
+        assert_eq!(expect_ty, format!("{}", t.ty(&mut ctx)), "{}", input);
     }
 }
 
