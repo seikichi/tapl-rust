@@ -20,7 +20,7 @@ pub enum Term {
     TmIf(Box<Term>, Box<Term>, Box<Term>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Binding {
     NameBind,
     VarBind(Ty),
@@ -37,8 +37,7 @@ use Command::*;
 use Term::*;
 use Ty::*;
 
-// NOTE: Copy on Write
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Context {
     bindings: Vec<(String, Binding)>,
 }
@@ -48,14 +47,23 @@ impl Context {
         Self { bindings: vec![] }
     }
 
-    fn add_binding(&self, x: String, bind: Binding) -> Self {
-        let mut bindings = self.bindings.clone();
-        bindings.push((x, bind));
-        Self { bindings }
+    fn add_binding(&mut self, x: String, bind: Binding) {
+        self.bindings.push((x, bind));
     }
 
-    fn add_name(&self, x: String) -> Self {
-        self.add_binding(x, NameBind)
+    fn add_name(&mut self, x: String) {
+        self.add_binding(x, NameBind);
+    }
+
+    fn with_binding<R, F: FnOnce(&mut Self) -> R>(&mut self, x: String, bind: Binding, f: F) -> R {
+        self.bindings.push((x, bind));
+        let result = f(self);
+        self.bindings.pop();
+        result
+    }
+
+    fn with_name<R, F: FnOnce(&mut Self) -> R>(&mut self, x: String, f: F) -> R {
+        self.with_binding(x, NameBind, f)
     }
 
     fn index2name(&self, x: usize) -> &String {
@@ -77,12 +85,12 @@ impl Context {
         }
     }
 
-    fn add_fresh_name(&self, x: &str) -> (Self, String) {
+    fn with_fresh_name<R, F: FnOnce(&mut Self, String) -> R>(&mut self, x: &str, f: F) -> R {
         let mut name: String = x.into();
         while self.is_name_bound(&name) {
             name.push_str("'");
         }
-        (self.add_name(name.clone()), name)
+        self.with_name(name.clone(), move |ctx| f(ctx, name))
     }
 
     fn is_name_bound(&self, x: &str) -> bool {
@@ -154,13 +162,35 @@ impl Term {
         t
     }
 
-    fn ty(&self, ctx: &Context) -> Ty {
+    // fn eval_by_big_step(&self, ctx: &Context) -> Self {
+    //     match self {
+    //         TmApp(t1, t2) => {
+    //             let t1 = t1.eval(ctx);
+    //             let t2 = t2.eval(ctx);
+    //             if let TmAbs(_, _, t12) = &t1 {
+    //                 if t2.is_val(ctx) {
+    //                     return t12.subst_top(&t2);
+    //                 }
+    //             }
+    //             TmApp(box t1, box t2)
+    //         }
+    //         TmIf(t1, t2, t3) => {
+    //             if let TmTrue = t1.eval(ctx) {
+    //                 t2.eval(ctx)
+    //             } else {
+    //                 t3.eval(ctx)
+    //             }
+    //         }
+    //         _ => (*self).clone(),
+    //     }
+    // }
+
+    fn ty(&self, ctx: &mut Context) -> Ty {
         match self {
             TmVar(i) => ctx.get_type(*i).clone(),
-            TmAbs(x, ty1, t2) => {
-                let ctx = ctx.add_binding(x.clone(), VarBind(ty1.clone()));
-                TyArr(box ty1.clone(), box t2.ty(&ctx))
-            }
+            TmAbs(x, ty1, t2) => ctx.with_binding(x.clone(), VarBind(ty1.clone()), |mut ctx| {
+                TyArr(box ty1.clone(), box t2.ty(&mut ctx))
+            }),
             TmApp(t1, t2) => {
                 let ty1 = t1.ty(ctx);
                 let ty2 = t2.ty(ctx);
@@ -188,13 +218,12 @@ impl Term {
         }
     }
 
-    fn format(&self, ctx: &Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn format(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TmAbs(x, ty, t1) => {
-                let (ctx, x) = ctx.add_fresh_name(x);
+            TmAbs(x, ty, t1) => ctx.with_fresh_name(x, |mut ctx, x| {
                 write!(f, "λ {}: {}. ", x, ty)?;
-                t1.format(&ctx, f)
-            }
+                t1.format(&mut ctx, f)
+            }),
             TmIf(t1, t2, t3) => {
                 write!(f, "if ")?;
                 t1.format(ctx, f)?;
@@ -207,7 +236,7 @@ impl Term {
         }
     }
 
-    fn format_app_term(&self, ctx: &Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn format_app_term(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TmApp(t1, t2) => {
                 t1.format_app_term(ctx, f)?;
@@ -218,7 +247,7 @@ impl Term {
         }
     }
 
-    fn format_atomic_term(&self, ctx: &Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn format_atomic_term(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TmVar(x) => write!(f, "{}", ctx.index2name(*x)),
             TmTrue => write!(f, "true"),
@@ -233,13 +262,13 @@ impl Term {
 }
 
 impl Ty {
-    fn format(&self, ctx: &Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn format(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             _ => self.format_arr_ty(ctx, f),
         }
     }
 
-    fn format_arr_ty(&self, ctx: &Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn format_arr_ty(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TyArr(t1, t2) => {
                 t1.format_atomic_ty(ctx, f)?;
@@ -250,7 +279,7 @@ impl Ty {
         }
     }
 
-    fn format_atomic_ty(&self, ctx: &Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn format_atomic_ty(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TyBool => write!(f, "Bool"),
             _ => {
@@ -264,13 +293,13 @@ impl Ty {
 
 impl fmt::Display for Term {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.format(&Context::new(), f)
+        self.format(&mut Context::new(), f)
     }
 }
 
 impl fmt::Display for Ty {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.format(&Context::new(), f)
+        self.format(&mut Context::new(), f)
     }
 }
 
@@ -298,34 +327,27 @@ mod parser {
         IResult,
     };
 
-    type ParseResult<T> = Box<dyn Fn(&Context) -> T>;
+    type ParseResult<T> = Box<dyn Fn(&mut Context) -> T>;
 
     pub fn parse(input: &str) -> IResult<&str, Vec<Command>> {
-        let (input, fs) = separated_list(pair(ms0, char(';')), command)(input)?;
-
-        let mut ctx = Context::new();
-        let mut commands = vec![];
-
-        for f in fs {
-            let (cmd, nctx) = f(&ctx);
-            commands.push(cmd);
-            ctx = nctx;
-        }
-
-        Ok((input, commands))
+        map(separated_list(pair(ms0, char(';')), command), |fs| {
+            let mut ctx = Context::new();
+            fs.iter().map(|f| f(&mut ctx)).collect()
+        })(input)
     }
 
-    fn command(input: &str) -> IResult<&str, ParseResult<(Command, Context)>> {
+    fn command(input: &str) -> IResult<&str, ParseResult<Command>> {
         alt((
             map(
                 pair(preceded(ms0, identifier), binder),
                 |(id, f)| -> ParseResult<_> {
-                    box move |ctx| (Bind(id.clone(), f(ctx)), ctx.add_name(id.clone()))
+                    box move |ctx| {
+                        ctx.add_name(id.clone());
+                        Bind(id.clone(), f(ctx))
+                    }
                 },
             ),
-            map(term, |f| -> ParseResult<_> {
-                box move |ctx| (Eval(f(ctx)), (*ctx).clone())
-            }),
+            map(term, |f| -> ParseResult<_> { box move |ctx| Eval(f(ctx)) }),
         ))(input)
     }
 
@@ -374,8 +396,9 @@ mod parser {
             )),
             |(_, s, _, tyf, _, tf)| -> ParseResult<_> {
                 box move |ctx| {
-                    let ctx = ctx.add_name(s.clone());
-                    TmAbs(s.clone(), tyf(&ctx), box tf(&ctx))
+                    ctx.with_name(s.clone(), |mut ctx| {
+                        TmAbs(s.clone(), tyf(&mut ctx), box tf(&mut ctx))
+                    })
                 }
             },
         )(input)
@@ -431,28 +454,25 @@ mod parser {
     }
 }
 
-fn process_command(commands: &[Command]) {
-    let mut ctx = Context::new();
-    for c in commands {
-        match c {
-            Command::Eval(t) => {
-                println!("> {}\n{} : {}", t, t.eval(&ctx), t.ty(&ctx));
-            }
-            Command::Bind(s, b) => {
-                println!("> {} {}", s, b);
-                ctx = ctx.add_binding(s.clone(), b.clone());
-            }
-        }
-    }
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     let filename = &args[1];
     let code = fs::read_to_string(filename)?;
     let (_, commands) = parser::parse(&code).unwrap();
 
-    process_command(&commands);
+    let mut ctx = Context::new();
+    for c in commands {
+        match c {
+            Command::Eval(t) => {
+                println!("> {}", t);
+                println!("{} : {}", t.eval(&ctx), t.ty(&mut ctx));
+            }
+            Command::Bind(s, b) => {
+                println!("> {} {}", s, b);
+                ctx.add_binding(s, b);
+            }
+        }
+    }
 
     Ok(())
 }
