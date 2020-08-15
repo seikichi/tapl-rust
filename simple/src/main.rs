@@ -26,6 +26,7 @@ pub enum Term {
     TmIsZero(Box<Term>),
     // Extension
     TmLet(String, Box<Term>, Box<Term>),
+    TmFix(Box<Term>),
 }
 
 #[derive(Debug)]
@@ -125,6 +126,7 @@ impl Term {
             TmIsZero(t1) => TmIsZero(box t1.map(c, onvar)),
             // Extension
             TmLet(x, t1, t2) => TmLet(x.clone(), box t1.map(c, onvar), box t2.map(c + 1, onvar)),
+            TmFix(t1) => TmFix(box t1.map(c, onvar)),
         }
     }
 
@@ -184,7 +186,9 @@ impl Term {
             TmIsZero(t1) => Some(TmIsZero(box t1.eval1(ctx)?)),
             // Extension
             TmLet(_, v1, t2) if v1.is_val(ctx) => Some(t2.subst_top(v1)),
-            TmLet(x, t1, t2) => Some(TmLet(x.clone(), box t1.eval(ctx), t2.clone())),
+            TmLet(x, t1, t2) => Some(TmLet(x.clone(), box t1.eval1(ctx)?, t2.clone())),
+            TmFix(box TmAbs(_, _, t12)) => Some(t12.subst_top(self)),
+            TmFix(t1) if !t1.is_val(ctx) => Some(TmFix(box t1.eval1(ctx)?)),
             // Other
             _ => None,
         }
@@ -276,6 +280,15 @@ impl Term {
                 let ty1 = t1.ty(ctx);
                 ctx.with_binding(x.clone(), VarBind(ty1), |ctx| t2.ty(ctx))
             }
+            TmFix(t1) => {
+                if let TyArr(box ty11, box ty12) = t1.ty(ctx) {
+                    if ty11 == ty12 {
+                        return ty12.clone();
+                    }
+                    panic!("result of body not compatible");
+                }
+                panic!("arrow type expected");
+            }
         }
     }
 
@@ -298,6 +311,10 @@ impl Term {
                 t1.format(ctx, f)?;
                 write!(f, " in ")?;
                 t2.format(ctx, f)
+            }
+            TmFix(t1) => {
+                write!(f, "fix ")?;
+                t1.format(ctx, f)
             }
             _ => self.format_app_term(ctx, f),
         }
@@ -462,8 +479,12 @@ mod parser {
 
     fn atomic_type(input: &str) -> IResult<&str, ParseResult<Ty>> {
         alt((
-            map(tag("Bool"), |_| -> ParseResult<_> { box |_ctx| TyBool }),
-            map(tag("Nat"), |_| -> ParseResult<_> { box |_ctx| TyNat }),
+            map(preceded(ms0, tag("Bool")), |_| -> ParseResult<_> {
+                box |_ctx| TyBool
+            }),
+            map(preceded(ms0, tag("Nat")), |_| -> ParseResult<_> {
+                box |_ctx| TyNat
+            }),
             preceded(ms0, delimited(char('('), all_type, char(')'))),
         ))(input)
     }
@@ -549,6 +570,10 @@ mod parser {
     fn app_term_1(input: &str) -> IResult<&str, ParseResult<Term>> {
         alt((
             map(
+                preceded(pair(ms0, tag("fix")), atomic_term),
+                |f| -> ParseResult<_> { box move |ctx| TmFix(box f(ctx)) },
+            ),
+            map(
                 preceded(pair(ms0, tag("succ")), atomic_term),
                 |f| -> ParseResult<_> { box move |ctx| TmSucc(box f(ctx)) },
             ),
@@ -589,7 +614,7 @@ mod parser {
     }
 
     const RESERVED_KEYWORDS: &'static [&'static str] = &[
-        "true", "false", "if", "then", "else", "succ", "pred", "iszero", "let", "in",
+        "true", "false", "if", "then", "else", "succ", "pred", "iszero", "let", "in", "fix",
     ];
 
     fn identifier(input: &str) -> IResult<&str, String> {
@@ -616,6 +641,11 @@ fn test() {
             "true",
             "Bool",
         ),
+        (
+            "(λ x: Bool -> Bool -> Bool. x true false) (λ x: Bool. λ y: Bool. true)",
+            "true",
+            "Bool",
+        ),
         // Nat
         ("(λ x:Nat. succ x) 41", "42", "Nat"),
         ("(λ x:Nat. if iszero x then 42 else 0) 0", "42", "Nat"),
@@ -623,6 +653,12 @@ fn test() {
         // Let
         ("let x=true in x", "true", "Bool"),
         ("let x=0 in let f=λ x:Nat. succ x in f x", "1", "Nat"),
+        // Fix
+        (
+            "(fix (λ f: Nat -> Nat -> Nat. λ m: Nat. λ n: Nat. if iszero m then n else succ (f (pred m) n))) 40 2",
+            "42",
+            "Nat",
+        ),
     ];
 
     for (input, expect_term, expect_ty) in testcases {
