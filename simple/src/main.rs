@@ -8,6 +8,7 @@ use std::fs;
 pub enum Ty {
     TyArr(Box<Ty>, Box<Ty>),
     TyBool,
+    TyNat,
 }
 
 #[derive(Debug, Clone)]
@@ -18,6 +19,11 @@ pub enum Term {
     TmTrue,
     TmFalse,
     TmIf(Box<Term>, Box<Term>, Box<Term>),
+    // Nat
+    TmZero,
+    TmSucc(Box<Term>),
+    TmPred(Box<Term>),
+    TmIsZero(Box<Term>),
 }
 
 #[derive(Debug)]
@@ -103,13 +109,18 @@ impl Term {
         match &self {
             TmVar(x) => onvar(c, *x),
             TmAbs(x, ty1, t2) => TmAbs(x.clone(), ty1.clone(), box t2.map(c + 1, onvar)),
-            TmApp(t1, t2) => TmApp(t1.map(c, onvar).into(), t2.map(c, onvar).into()),
+            TmApp(t1, t2) => TmApp(box t1.map(c, onvar), box t2.map(c, onvar)),
             TmTrue | TmFalse => (*self).clone(),
             TmIf(t1, t2, t3) => TmIf(
                 box t1.map(c, onvar),
                 box t2.map(c, onvar),
                 box t3.map(c, onvar),
             ),
+            // Nat
+            TmZero => TmZero,
+            TmSucc(t1) => TmSucc(box t1.map(c, onvar)),
+            TmPred(t1) => TmPred(box t1.map(c, onvar)),
+            TmIsZero(t1) => TmIsZero(box t1.map(c, onvar)),
         }
     }
 
@@ -135,9 +146,18 @@ impl Term {
         self.subst(0, &s.shift(1)).shift(-1)
     }
 
-    fn is_val(&self, _ctx: &Context) -> bool {
+    fn is_numeric_val(&self, ctx: &Context) -> bool {
+        match self {
+            TmZero => true,
+            TmSucc(t1) => t1.is_numeric_val(ctx),
+            _ => false,
+        }
+    }
+
+    fn is_val(&self, ctx: &Context) -> bool {
         match self {
             TmTrue | TmFalse | TmAbs(_, _, _) => true,
+            _ if self.is_numeric_val(ctx) => true,
             _ => false,
         }
     }
@@ -150,6 +170,14 @@ impl Term {
             TmIf(box TmTrue, t2, _) => Some((**t2).clone()),
             TmIf(box TmFalse, _, t3) => Some((**t3).clone()),
             TmIf(t1, t2, t3) => Some(TmIf(box t1.eval1(ctx)?, t2.clone(), t3.clone())),
+            // Nat
+            TmSucc(t1) => Some(TmSucc(box t1.eval1(ctx)?)),
+            TmPred(box TmZero) => Some(TmZero),
+            TmPred(box TmSucc(nv1)) if nv1.is_numeric_val(ctx) => Some((**nv1).clone()),
+            TmPred(t1) => Some(TmPred(box t1.eval1(ctx)?)),
+            TmIsZero(box TmZero) => Some(TmTrue),
+            TmIsZero(box TmSucc(nv1)) if nv1.is_numeric_val(ctx) => Some(TmFalse),
+            TmIsZero(t1) => Some(TmIsZero(box t1.eval1(ctx)?)),
             _ => None,
         }
     }
@@ -215,6 +243,26 @@ impl Term {
                 }
                 panic!("guard of conditional not a boolean");
             }
+            // Nat
+            TmZero => TyNat,
+            TmSucc(t1) => {
+                if let TyNat = t1.ty(ctx) {
+                    return TyNat;
+                }
+                panic!("argument of succ is not a number");
+            }
+            TmPred(t1) => {
+                if let TyNat = t1.ty(ctx) {
+                    return TyNat;
+                }
+                panic!("argument of succ is not a number");
+            }
+            TmIsZero(t1) => {
+                if let TyNat = t1.ty(ctx) {
+                    return TyBool;
+                }
+                panic!("argument of succ is not a number");
+            }
         }
     }
 
@@ -243,6 +291,15 @@ impl Term {
                 write!(f, " ")?;
                 t2.format_atomic_term(ctx, f)
             }
+            // Nat
+            TmPred(t1) => {
+                write!(f, "pred ")?;
+                t1.format_app_term(ctx, f)
+            }
+            TmIsZero(t1) => {
+                write!(f, "iszero ")?;
+                t1.format_app_term(ctx, f)
+            }
             _ => self.format_atomic_term(ctx, f),
         }
     }
@@ -252,6 +309,27 @@ impl Term {
             TmVar(x) => write!(f, "{}", ctx.index2name(*x)),
             TmTrue => write!(f, "true"),
             TmFalse => write!(f, "false"),
+            TmZero => write!(f, "0"),
+            TmSucc(t1) => {
+                let mut t = t1;
+                let mut n = 1;
+                loop {
+                    match t {
+                        box TmZero => return write!(f, "{}", n),
+                        box TmSucc(s) => {
+                            t = s;
+                            n += 1;
+                        }
+                        _ => {
+                            return {
+                                write!(f, "(succ ")?;
+                                t1.format_atomic_term(ctx, f)?;
+                                write!(f, ")")
+                            }
+                        }
+                    }
+                }
+            }
             _ => {
                 write!(f, "(")?;
                 self.format(ctx, f)?;
@@ -282,7 +360,8 @@ impl Ty {
     fn format_atomic_ty(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TyBool => write!(f, "Bool"),
-            _ => {
+            TyNat => write!(f, "Nat"),
+            TyArr(_, _) => {
                 write!(f, "(")?;
                 self.format(ctx, f)?;
                 write!(f, ")")
@@ -319,7 +398,7 @@ mod parser {
         branch::alt,
         bytes::complete::tag,
         character::complete::{
-            alpha1, alphanumeric0, char, multispace0 as ms0, multispace1 as ms1,
+            alpha1, alphanumeric0, char, digit1, multispace0 as ms0, multispace1 as ms1,
         },
         combinator::{map, verify},
         multi::{separated_list, separated_nonempty_list},
@@ -365,6 +444,7 @@ mod parser {
     fn atomic_type(input: &str) -> IResult<&str, ParseResult<Ty>> {
         alt((
             map(tag("Bool"), |_| -> ParseResult<_> { box |_ctx| TyBool }),
+            map(tag("Nat"), |_| -> ParseResult<_> { box |_ctx| TyNat }),
             preceded(ms0, delimited(char('('), all_type, char(')'))),
         ))(input)
     }
@@ -421,11 +501,29 @@ mod parser {
     }
 
     fn app_term(input: &str) -> IResult<&str, ParseResult<Term>> {
-        map(separated_nonempty_list(ms1, atomic_term), |fs| {
+        map(separated_nonempty_list(ms1, app_term_1), |fs| {
             let mut it = fs.into_iter();
             let f = it.next().unwrap();
             it.fold(f, |f1, f2| box move |ctx| TmApp(box f1(ctx), box f2(ctx)))
         })(input)
+    }
+
+    fn app_term_1(input: &str) -> IResult<&str, ParseResult<Term>> {
+        alt((
+            map(
+                preceded(pair(ms0, tag("succ")), atomic_term),
+                |f| -> ParseResult<_> { box move |ctx| TmSucc(box f(ctx)) },
+            ),
+            map(
+                preceded(pair(ms0, tag("pred")), atomic_term),
+                |f| -> ParseResult<_> { box move |ctx| TmPred(box f(ctx)) },
+            ),
+            map(
+                preceded(pair(ms0, tag("iszero")), atomic_term),
+                |f| -> ParseResult<_> { box move |ctx| TmIsZero(box f(ctx)) },
+            ),
+            atomic_term,
+        ))(input)
     }
 
     fn atomic_term(input: &str) -> IResult<&str, ParseResult<Term>> {
@@ -438,11 +536,23 @@ mod parser {
                     box move |ctx| TmVar(ctx.name2index(&s).unwrap())
                 }),
                 delimited(char('('), term, char(')')),
+                // Nat
+                map(int_value, |n| -> ParseResult<_> {
+                    box move |_| {
+                        let mut result = TmZero;
+                        for _ in 0..n {
+                            result = TmSucc(box result);
+                        }
+                        result
+                    }
+                }),
             )),
         )(input)
     }
 
-    const RESERVED_KEYWORDS: &'static [&'static str] = &["true", "false", "if", "then", "else"];
+    const RESERVED_KEYWORDS: &'static [&'static str] = &[
+        "true", "false", "if", "then", "else", "succ", "pred", "iszero",
+    ];
 
     fn identifier(input: &str) -> IResult<&str, String> {
         verify(
@@ -451,6 +561,41 @@ mod parser {
             }),
             |s: &String| !RESERVED_KEYWORDS.iter().any(|x| x == &s),
         )(input)
+    }
+
+    fn int_value(input: &str) -> IResult<&str, u32> {
+        map(digit1, |s: &str| s.parse().unwrap())(input)
+    }
+}
+
+#[test]
+fn test() {
+    let testcases = vec![
+        // Bool,
+        ("true", "true"),
+        (
+            "(λ x:Bool->Bool. if x true then true else false) (λ x:Bool. x)",
+            "true",
+        ),
+        // Nat
+        ("(λ x:Nat. succ x) 41", "42"),
+        ("(λ x:Nat. if iszero x then 42 else 0) 0", "42"),
+        ("(λ x:Nat. if iszero x then 42 else 0) 1", "0"),
+    ];
+
+    for (input, expect) in testcases {
+        let (_, commands) = parser::parse(input).unwrap();
+
+        let mut ctx = Context::new();
+        let mut result = None;
+        for c in commands {
+            match c {
+                Command::Eval(t) => result = Some(t.eval(&ctx)),
+                Command::Bind(s, b) => ctx.add_binding(s, b),
+            }
+        }
+
+        assert_eq!(expect, format!("{}", result.unwrap()));
     }
 }
 
