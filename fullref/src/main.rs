@@ -786,10 +786,42 @@ mod parser {
             map(preceded(ms0, tag("Nat")), |_| -> ParseResult<_> {
                 box |_ctx| TyNat
             }),
-            preceded(ms0, delimited(char('('), all_type, char(')'))),
+            map(
+                preceded(
+                    ms0,
+                    delimited(char('{'), field_types, preceded(ms0, char('}'))),
+                ),
+                |f| -> ParseResult<_> { box move |ctx| TyRecord(f(ctx)) },
+            ),
+            preceded(
+                ms0,
+                delimited(char('('), all_type, preceded(ms0, char(')'))),
+            ),
         ))(input)
     }
 
+    fn field_types(input: &str) -> IResult<&str, ParseResult<Vec<(String, Ty)>>> {
+        map(
+            separated_list(pair(ms0, char(',')), field_type),
+            |fs| -> ParseResult<_> {
+                box move |ctx| fs.iter().enumerate().map(|(i, f)| f(ctx, i + 1)).collect()
+            },
+        )(input)
+    }
+
+    type FieldTypeResult = Box<dyn Fn(&mut Context, usize) -> (String, Ty)>;
+
+    fn field_type(input: &str) -> IResult<&str, FieldTypeResult> {
+        alt((
+            map(
+                tuple((label, ms0, char(':'), all_type)),
+                |(l, _, _, f)| -> FieldTypeResult { box move |ctx, _| (l.clone(), f(ctx)) },
+            ),
+            map(all_type, |f| -> FieldTypeResult {
+                box move |ctx, i| (format!("{}", i), f(ctx))
+            }),
+        ))(input)
+    }
     fn arrow_type(input: &str) -> IResult<&str, ParseResult<Ty>> {
         map(
             separated_nonempty_list(pair(ms0, tag("->")), atomic_type),
@@ -1158,6 +1190,7 @@ fn test() {
         ("{true, 1}.1", "true", "Bool"),
         ("{1, {2, {3}}}.2.2.1", "3", "Nat"),
         ("{x = (λ x: Nat. succ x) 0, y = succ 10}", "{x = 1, y = 11}", "{x: Nat, y: Nat}"),
+        ("(λ r: {x: Nat, y: Bool}. r.x) {x = 42, y = true}", "42", "Nat"),
     ];
 
     for (input, expect_term, expect_ty) in testcases {
