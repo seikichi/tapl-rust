@@ -65,7 +65,7 @@ use Command::*;
 use Term::*;
 use Ty::*;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Context {
     bindings: Vec<(String, Binding)>,
 }
@@ -619,6 +619,13 @@ impl Term {
             }
         }
     }
+
+    fn display(&self, ctx: &Context) -> TermDisplay {
+        TermDisplay {
+            t: self.clone(),
+            ctx: ctx.clone(),
+        }
+    }
 }
 
 impl Ty {
@@ -709,6 +716,24 @@ impl Binding {
             TmAbbBind(t, Some(ty)) => TmAbbBind(t.shift(d), Some(ty.clone())),
         }
     }
+
+    fn display(&self, ctx: &Context) -> BindingDisplay {
+        BindingDisplay {
+            b: self.clone(),
+            ctx: ctx.clone(),
+        }
+    }
+
+    fn format(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NameBind => Ok(()),
+            VarBind(ty) => write!(f, ": {}", ty),
+            TmAbbBind(t, _) => {
+                write!(f, "= ")?;
+                t.format(ctx, f)
+            }
+        }
+    }
 }
 
 impl fmt::Display for Term {
@@ -725,11 +750,29 @@ impl fmt::Display for Ty {
 
 impl fmt::Display for Binding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            NameBind => Ok(()),
-            VarBind(ty) => write!(f, ": {}", ty),
-            TmAbbBind(t, _) => write!(f, "= {}", t),
-        }
+        self.format(&mut Context::new(), f)
+    }
+}
+
+struct TermDisplay {
+    t: Term,
+    ctx: Context,
+}
+
+struct BindingDisplay {
+    b: Binding,
+    ctx: Context,
+}
+
+impl fmt::Display for TermDisplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.t.format(&mut self.ctx.clone(), f)
+    }
+}
+
+impl fmt::Display for BindingDisplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.b.format(&mut self.ctx.clone(), f)
     }
 }
 
@@ -1274,12 +1317,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for c in commands {
         match c {
             Command::Eval(t) => {
-                println!("> {:?}", t);
+                println!("> {}", t.display(&ctx));
                 println!("{} : {}", t.eval(&ctx, &mut store), t.ty(&mut ctx));
             }
             Command::Bind(s, b) => {
                 let b = b.check(&mut ctx).eval(&ctx, &mut store);
-                println!("> {} {}", s, b);
+                println!("> {} {}", s, b.display(&ctx));
                 ctx.add_binding(s, b);
                 store.shift(1);
             }
