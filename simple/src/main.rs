@@ -12,6 +12,7 @@ pub enum Ty {
     TyUnit,
     TyString,
     TyFloat,
+    TyRef(Box<Ty>),
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +36,11 @@ pub enum Term {
     TmAscribe(Box<Term>, Ty),
     TmLet(String, Box<Term>, Box<Term>),
     TmFix(Box<Term>),
+    // Ref
+    TmLoc(usize),
+    TmRef(Box<Term>),
+    TmDeref(Box<Term>),
+    TmAssign(Box<Term>, Box<Term>),
 }
 
 #[derive(Debug)]
@@ -115,6 +121,30 @@ impl Context {
     }
 }
 
+#[derive(Debug)]
+pub struct Store {
+    terms: Vec<Term>,
+}
+
+impl Store {
+    fn new() -> Self {
+        Self { terms: vec![] }
+    }
+
+    fn extend(&mut self, v: Term) -> usize {
+        self.terms.push(v);
+        self.terms.len() - 1
+    }
+
+    fn update(&mut self, n: usize, v: Term) {
+        self.terms[n] = v;
+    }
+
+    fn lookup(&self, l: usize) -> &Term {
+        &self.terms[l]
+    }
+}
+
 impl Term {
     fn map<F: Copy + Fn(i32, usize) -> Self>(&self, c: i32, onvar: F) -> Self {
         match &self {
@@ -140,6 +170,11 @@ impl Term {
             TmAscribe(t1, ty) => TmAscribe(box t1.map(c, onvar), ty.clone()),
             TmLet(x, t1, t2) => TmLet(x.clone(), box t1.map(c, onvar), box t2.map(c + 1, onvar)),
             TmFix(t1) => TmFix(box t1.map(c, onvar)),
+            // Ref
+            TmLoc(l) => TmLoc(*l),
+            TmRef(t1) => TmRef(box t1.map(c, onvar)),
+            TmDeref(t1) => TmDeref(box t1.map(c, onvar)),
+            TmAssign(t1, t2) => TmAssign(box t1.map(c, onvar), box t2.map(c, onvar)),
         }
     }
 
@@ -175,48 +210,66 @@ impl Term {
 
     fn is_val(&self, ctx: &Context) -> bool {
         match self {
-            TmTrue | TmFalse | TmAbs(_, _, _) | TmUnit | TmString(_) | TmFloat(_) => true,
+            TmTrue | TmFalse | TmAbs(_, _, _) | TmUnit | TmString(_) | TmFloat(_) | TmLoc(_) => {
+                true
+            }
             _ if self.is_numeric_val(ctx) => true,
             _ => false,
         }
     }
 
-    fn eval1(&self, ctx: &Context) -> Option<Self> {
+    fn eval1(&self, ctx: &Context, store: &mut Store) -> Option<Self> {
         match self {
             TmApp(box TmAbs(_, _, t12), v2) if v2.is_val(ctx) => Some(t12.subst_top(v2)),
-            TmApp(v1, t2) if v1.is_val(ctx) => Some(TmApp(v1.clone(), box t2.eval1(ctx)?)),
-            TmApp(t1, t2) => Some(TmApp(box t1.eval1(ctx)?, t2.clone())),
+            TmApp(v1, t2) if v1.is_val(ctx) => Some(TmApp(v1.clone(), box t2.eval1(ctx, store)?)),
+            TmApp(t1, t2) => Some(TmApp(box t1.eval1(ctx, store)?, t2.clone())),
             TmIf(box TmTrue, t2, _) => Some((**t2).clone()),
             TmIf(box TmFalse, _, t3) => Some((**t3).clone()),
-            TmIf(t1, t2, t3) => Some(TmIf(box t1.eval1(ctx)?, t2.clone(), t3.clone())),
+            TmIf(t1, t2, t3) => Some(TmIf(box t1.eval1(ctx, store)?, t2.clone(), t3.clone())),
             // Nat
-            TmSucc(t1) => Some(TmSucc(box t1.eval1(ctx)?)),
+            TmSucc(t1) => Some(TmSucc(box t1.eval1(ctx, store)?)),
             TmPred(box TmZero) => Some(TmZero),
             TmPred(box TmSucc(nv1)) if nv1.is_numeric_val(ctx) => Some((**nv1).clone()),
-            TmPred(t1) => Some(TmPred(box t1.eval1(ctx)?)),
+            TmPred(t1) => Some(TmPred(box t1.eval1(ctx, store)?)),
             TmIsZero(box TmZero) => Some(TmTrue),
             TmIsZero(box TmSucc(nv1)) if nv1.is_numeric_val(ctx) => Some(TmFalse),
-            TmIsZero(t1) => Some(TmIsZero(box t1.eval1(ctx)?)),
+            TmIsZero(t1) => Some(TmIsZero(box t1.eval1(ctx, store)?)),
             // Extension
             TmTimesFloat(box TmFloat(f1), box TmFloat(f2)) => Some(TmFloat(*f1 * *f2)),
             TmTimesFloat(box TmFloat(f1), t2) => {
-                Some(TmTimesFloat(box TmFloat(*f1), box t2.eval1(ctx)?))
+                Some(TmTimesFloat(box TmFloat(*f1), box t2.eval1(ctx, store)?))
             }
-            TmTimesFloat(t1, t2) => Some(TmTimesFloat(box t1.eval1(ctx)?, (*t2).clone())),
+            TmTimesFloat(t1, t2) => Some(TmTimesFloat(box t1.eval1(ctx, store)?, (*t2).clone())),
             TmAscribe(v1, _) if v1.is_val(ctx) => Some((**v1).clone()),
-            TmAscribe(t1, ty) => Some(TmAscribe(box t1.eval1(ctx)?, ty.clone())),
+            TmAscribe(t1, ty) => Some(TmAscribe(box t1.eval1(ctx, store)?, ty.clone())),
             TmLet(_, v1, t2) if v1.is_val(ctx) => Some(t2.subst_top(v1)),
-            TmLet(x, t1, t2) => Some(TmLet(x.clone(), box t1.eval1(ctx)?, t2.clone())),
+            TmLet(x, t1, t2) => Some(TmLet(x.clone(), box t1.eval1(ctx, store)?, t2.clone())),
             TmFix(box TmAbs(_, _, t12)) => Some(t12.subst_top(self)),
-            TmFix(t1) if !t1.is_val(ctx) => Some(TmFix(box t1.eval1(ctx)?)),
+            TmFix(t1) if !t1.is_val(ctx) => Some(TmFix(box t1.eval1(ctx, store)?)),
+            // Ref
+            TmRef(box t1) if t1.is_val(ctx) => {
+                let l = store.extend(t1.clone());
+                Some(TmLoc(l))
+            }
+            TmRef(t1) => Some(TmRef(box t1.eval1(ctx, store)?)),
+            TmDeref(box TmLoc(l)) => Some(store.lookup(*l).clone()),
+            TmDeref(box t1) if !t1.is_val(ctx) => Some(TmDeref(box t1.eval1(ctx, store)?)),
+            TmAssign(box TmLoc(l), box v2) if v2.is_val(ctx) => {
+                store.update(*l, v2.clone());
+                Some(TmUnit)
+            }
+            TmAssign(v1, t2) if v1.is_val(ctx) => {
+                Some(TmAssign(v1.clone(), box t2.eval1(ctx, store)?))
+            }
+            TmAssign(t1, t2) => Some(TmAssign(box t1.eval1(ctx, store)?, t2.clone())),
             // Other
             _ => None,
         }
     }
 
-    fn eval(&self, ctx: &Context) -> Self {
+    fn eval(&self, ctx: &Context, store: &mut Store) -> Self {
         let mut t = self.clone();
-        while let Some(n) = t.eval1(ctx) {
+        while let Some(n) = t.eval1(ctx, store) {
             t = n;
         }
         t
@@ -329,6 +382,24 @@ impl Term {
                 }
                 panic!("arrow type expected");
             }
+            // Assign
+            TmRef(t1) => TyRef(box t1.ty(ctx)),
+            TmLoc(_) => panic!("locations are not supposed to occur in source programs!"),
+            TmDeref(t1) => {
+                if let TyRef(box ty1) = t1.ty(ctx) {
+                    return ty1.clone();
+                }
+                panic!("argument of ! is not a Ref");
+            }
+            TmAssign(t1, t2) => {
+                if let TyRef(box ty1) = t1.ty(ctx) {
+                    if ty1 == t2.ty(ctx) {
+                        return TyUnit;
+                    }
+                    panic!("arguments of := are incompatible");
+                }
+                panic!("arguments of ! is not a Ref");
+            }
         }
     }
 
@@ -356,6 +427,11 @@ impl Term {
                 write!(f, "fix ")?;
                 t1.format(ctx, f)
             }
+            TmAssign(t1, t2) => {
+                t1.format_app_term(ctx, f)?;
+                write!(f, " := ")?;
+                t2.format_app_term(ctx, f)
+            }
             _ => self.format_app_term(ctx, f),
         }
     }
@@ -382,6 +458,15 @@ impl Term {
                 t1.format_atomic_term(ctx, f)?;
                 write!(f, " ")?;
                 t2.format_atomic_term(ctx, f)
+            }
+            // Ref
+            TmRef(t1) => {
+                write!(f, "ref ")?;
+                t1.format_atomic_term(ctx, f)
+            }
+            TmDeref(t1) => {
+                write!(f, "!")?;
+                t1.format_atomic_term(ctx, f)
             }
             _ => self.format_ascribe_term(ctx, f),
         }
@@ -427,6 +512,7 @@ impl Term {
                     }
                 }
             }
+            TmLoc(l) => write!(f, "<loc #{}>", l),
             _ => {
                 write!(f, "(")?;
                 self.format(ctx, f)?;
@@ -461,6 +547,10 @@ impl Ty {
             TyString => write!(f, "String"),
             TyFloat => write!(f, "Float"),
             TyNat => write!(f, "Nat"),
+            TyRef(ty) => {
+                write!(f, "Ref ")?;
+                ty.format_atomic_ty(ctx, f)
+            }
             TyArr(_, _) => {
                 write!(f, "(")?;
                 self.format(ctx, f)?;
@@ -575,7 +665,7 @@ mod parser {
     }
 
     pub fn term(input: &str) -> IResult<&str, ParseResult<Term>> {
-        alt((if_term, lambda, let_term, letrec_term, app_term))(input)
+        alt((if_term, lambda, let_term, letrec_term, assign, app_term))(input)
     }
 
     fn lambda(input: &str) -> IResult<&str, ParseResult<Term>> {
@@ -595,6 +685,13 @@ mod parser {
                     })
                 }
             },
+        )(input)
+    }
+
+    fn assign(input: &str) -> IResult<&str, ParseResult<Term>> {
+        map(
+            tuple((app_term, preceded(ms0, tag(":=")), app_term)),
+            |(f1, _, f2)| -> ParseResult<_> { box move |ctx| TmAssign(box f1(ctx), box f2(ctx)) },
         )(input)
     }
 
@@ -692,6 +789,14 @@ mod parser {
                     box move |ctx| TmTimesFloat(box f1(ctx), box f2(ctx))
                 },
             ),
+            map(
+                preceded(pair(ms0, tag("ref")), ascribe_term),
+                |f| -> ParseResult<_> { box move |ctx| TmRef(box f(ctx)) },
+            ),
+            map(
+                preceded(pair(ms0, tag("!")), ascribe_term),
+                |f| -> ParseResult<_> { box move |ctx| TmDeref(box f(ctx)) },
+            ),
             ascribe_term,
         ))(input)
     }
@@ -758,7 +863,8 @@ mod parser {
     }
 
     const RESERVED_KEYWORDS: &'static [&'static str] = &[
-        "true", "false", "if", "then", "else", "succ", "pred", "iszero", "let", "in", "fix", "unit",
+        "true", "false", "if", "then", "else", "succ", "pred", "iszero", "let", "in", "fix",
+        "unit", "ref",
     ];
 
     fn identifier(input: &str) -> IResult<&str, String> {
@@ -849,20 +955,26 @@ fn test() {
         // As
         ("true as Bool", "true", "Bool"),
         ("λ x:Bool. x as Bool", "λ x: Bool. x as Bool", "Bool -> Bool"),
+        // Ref
+        ("let r = ref 40 in (r := succ(!r); r := succ(!r); !r)", "42", "Nat"),
     ];
 
     for (input, expect_term, expect_ty) in testcases {
-        let (_, commands) = parser::parse(input).unwrap();
+        let result = parser::parse(input);
+        assert!(result.is_ok(), "{}", input);
+        let (_, commands) = result.unwrap();
 
         let mut ctx = Context::new();
+        let mut store = Store::new();
         let mut result = None;
         for c in commands {
             match c {
-                Command::Eval(t) => result = Some(t.eval(&ctx)),
+                Command::Eval(t) => result = Some(t.eval(&ctx, &mut store)),
                 Command::Bind(s, b) => ctx.add_binding(s, b),
             }
         }
 
+        assert!(result.is_some(), "{}", input);
         let t = result.unwrap();
         assert_eq!(expect_term, format!("{}", t), "{}", input);
         assert_eq!(expect_ty, format!("{}", t.ty(&mut ctx)), "{}", input);
@@ -876,11 +988,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (_, commands) = parser::parse(&code).unwrap();
 
     let mut ctx = Context::new();
+    let mut store = Store::new();
     for c in commands {
         match c {
             Command::Eval(t) => {
                 println!("> {}", t);
-                println!("{} : {}", t.eval(&ctx), t.ty(&mut ctx));
+                println!("{} : {}", t.eval(&ctx, &mut store), t.ty(&mut ctx));
             }
             Command::Bind(s, b) => {
                 println!("> {} {}", s, b);
