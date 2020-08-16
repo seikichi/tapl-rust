@@ -10,6 +10,7 @@ pub enum Ty {
     TyBool,
     TyNat,
     TyUnit,
+    TyString,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +26,8 @@ pub enum Term {
     TmSucc(Box<Term>),
     TmPred(Box<Term>),
     TmIsZero(Box<Term>),
+    // String
+    TmString(String),
     // Unit
     TmUnit,
     // Extension
@@ -128,6 +131,8 @@ impl Term {
             TmSucc(t1) => TmSucc(box t1.map(c, onvar)),
             TmPred(t1) => TmPred(box t1.map(c, onvar)),
             TmIsZero(t1) => TmIsZero(box t1.map(c, onvar)),
+            // String
+            TmString(s) => TmString(s.clone()),
             // Unit
             TmUnit => TmUnit,
             // Extension
@@ -169,7 +174,7 @@ impl Term {
 
     fn is_val(&self, ctx: &Context) -> bool {
         match self {
-            TmTrue | TmFalse | TmAbs(_, _, _) | TmUnit => true,
+            TmTrue | TmFalse | TmAbs(_, _, _) | TmUnit | TmString(_) => true,
             _ if self.is_numeric_val(ctx) => true,
             _ => false,
         }
@@ -266,6 +271,8 @@ impl Term {
             }
             // Unit
             TmUnit => TyUnit,
+            // String
+            TmString(_) => TyString,
             // Nat
             TmZero => TyNat,
             TmSucc(t1) => {
@@ -374,6 +381,7 @@ impl Term {
             TmTrue => write!(f, "true"),
             TmFalse => write!(f, "false"),
             TmUnit => write!(f, "unit"),
+            TmString(s) => write!(f, "\"{}\"", s),
             TmZero => write!(f, "0"),
             TmSucc(t1) => {
                 let mut t = t1;
@@ -426,6 +434,7 @@ impl Ty {
         match self {
             TyBool => write!(f, "Bool"),
             TyUnit => write!(f, "Unit"),
+            TyString => write!(f, "String"),
             TyNat => write!(f, "Nat"),
             TyArr(_, _) => {
                 write!(f, "(")?;
@@ -464,10 +473,10 @@ mod parser {
         branch::alt,
         bytes::complete::tag,
         character::complete::{
-            alpha1, alphanumeric0, char, digit1, multispace0 as ms0, multispace1 as ms1,
+            alpha1, alphanumeric0, char, digit1, multispace0 as ms0, multispace1 as ms1, none_of,
         },
         combinator::{map, verify},
-        multi::{separated_list, separated_nonempty_list},
+        multi::{many0, separated_list, separated_nonempty_list},
         sequence::{delimited, pair, preceded, tuple},
         IResult,
     };
@@ -514,6 +523,9 @@ mod parser {
             }),
             map(preceded(ms0, tag("Unit")), |_| -> ParseResult<_> {
                 box |_ctx| TyUnit
+            }),
+            map(preceded(ms0, tag("String")), |_| -> ParseResult<_> {
+                box |_ctx| TyString
             }),
             map(preceded(ms0, tag("Nat")), |_| -> ParseResult<_> {
                 box |_ctx| TyNat
@@ -691,6 +703,10 @@ mod parser {
                     box move |ctx| TmVar(ctx.name2index(&s).unwrap())
                 }),
                 delimited(char('('), term_seq, char(')')),
+                // String
+                map(string_value, |s: String| -> ParseResult<_> {
+                    box move |_| TmString(s.clone())
+                }),
                 // Nat
                 map(int_value, |n| -> ParseResult<_> {
                     box move |_| {
@@ -720,6 +736,12 @@ mod parser {
 
     fn int_value(input: &str) -> IResult<&str, u32> {
         map(digit1, |s: &str| s.parse().unwrap())(input)
+    }
+
+    fn string_value(input: &str) -> IResult<&str, String> {
+        map(delimited(char('"'), many0(none_of("\"")), char('"')), |s| {
+            s.iter().collect()
+        })(input)
     }
 }
 
@@ -753,6 +775,9 @@ fn test() {
         ("(λ x: Nat. succ x) 41", "42", "Nat"),
         ("(λ x: Nat. if iszero x then 42 else 0) 0", "42", "Nat"),
         ("(λ x: Nat. if iszero x then 42 else 0) 1", "0", "Nat"),
+        // String
+        (r#""hello""#, r#""hello""#, "String"),
+        (r#"λ x: Bool. "hello""#, r#"λ x: Bool. "hello""#, "Bool -> String"),
         // Let
         ("let x=true in x", "true", "Bool"),
         ("let x=0 in let f=λ x: Nat. succ x in f x", "1", "Nat"),
