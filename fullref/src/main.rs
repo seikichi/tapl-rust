@@ -94,8 +94,13 @@ impl Context {
         self.with_binding(x, NameBind, f)
     }
 
-    fn index2name(&self, x: usize) -> &String {
-        &self.bindings[self.bindings.len() - x - 1].0
+    fn index2name(&self, x: usize) -> Option<&String> {
+        if self.bindings.len() <= x {
+            return None;
+        }
+        self.bindings
+            .get(self.bindings.len() - x - 1)
+            .map(|(s, _)| s)
     }
 
     fn name2index(&self, x: &str) -> Option<usize> {
@@ -151,9 +156,9 @@ impl Store {
         &self.terms[l]
     }
 
-    fn shift(&mut self, i: i32) {
-        for s in &mut self.terms {
-            *s = s.shift(i);
+    fn shift(&mut self, d: i32) {
+        for i in 0..self.terms.len() {
+            self.terms[i] = self.terms[i].shift(d);
         }
     }
 }
@@ -489,7 +494,7 @@ impl Term {
                 write!(f, "let {} = ", x)?;
                 t1.format(ctx, f)?;
                 write!(f, " in ")?;
-                t2.format(ctx, f)
+                ctx.with_name(x.clone(), |ctx| t2.format(ctx, f))
             }
             TmFix(t1) => {
                 write!(f, "fix ")?;
@@ -563,7 +568,11 @@ impl Term {
 
     fn format_atomic_term(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TmVar(x) => write!(f, "{}", ctx.index2name(*x)),
+            TmVar(x) => write!(
+                f,
+                "{}",
+                ctx.index2name(*x).unwrap_or(&format!("<context #{}>", x))
+            ),
             TmTrue => write!(f, "true"),
             TmFalse => write!(f, "false"),
             TmUnit => write!(f, "unit"),
@@ -1265,7 +1274,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for c in commands {
         match c {
             Command::Eval(t) => {
-                println!("> {}", t);
+                println!("> {:?}", t);
                 println!("{} : {}", t.eval(&ctx, &mut store), t.ty(&mut ctx));
             }
             Command::Bind(s, b) => {
