@@ -28,6 +28,7 @@ pub enum Term {
     // Unit
     TmUnit,
     // Extension
+    TmAscribe(Box<Term>, Ty),
     TmLet(String, Box<Term>, Box<Term>),
     TmFix(Box<Term>),
 }
@@ -130,6 +131,7 @@ impl Term {
             // Unit
             TmUnit => TmUnit,
             // Extension
+            TmAscribe(t1, ty) => TmAscribe(box t1.map(c, onvar), ty.clone()),
             TmLet(x, t1, t2) => TmLet(x.clone(), box t1.map(c, onvar), box t2.map(c + 1, onvar)),
             TmFix(t1) => TmFix(box t1.map(c, onvar)),
         }
@@ -190,6 +192,8 @@ impl Term {
             TmIsZero(box TmSucc(nv1)) if nv1.is_numeric_val(ctx) => Some(TmFalse),
             TmIsZero(t1) => Some(TmIsZero(box t1.eval1(ctx)?)),
             // Extension
+            TmAscribe(v1, _) if v1.is_val(ctx) => Some((**v1).clone()),
+            TmAscribe(t1, ty) => Some(TmAscribe(box t1.eval1(ctx)?, ty.clone())),
             TmLet(_, v1, t2) if v1.is_val(ctx) => Some(t2.subst_top(v1)),
             TmLet(x, t1, t2) => Some(TmLet(x.clone(), box t1.eval1(ctx)?, t2.clone())),
             TmFix(box TmAbs(_, _, t12)) => Some(t12.subst_top(self)),
@@ -283,6 +287,12 @@ impl Term {
                 panic!("argument of succ is not a number");
             }
             // Extension
+            TmAscribe(t1, ty1) => {
+                if t1.ty(ctx) == *ty1 {
+                    return ty1.clone();
+                }
+                panic!("body of as-term does not have the expected type");
+            }
             TmLet(x, t1, t2) => {
                 let ty1 = t1.ty(ctx);
                 ctx.with_binding(x.clone(), VarBind(ty1), |ctx| t2.ty(ctx))
@@ -332,16 +342,27 @@ impl Term {
             TmApp(t1, t2) => {
                 t1.format_app_term(ctx, f)?;
                 write!(f, " ")?;
-                t2.format_atomic_term(ctx, f)
+                t2.format_ascribe_term(ctx, f)
             }
             // Nat
             TmPred(t1) => {
                 write!(f, "pred ")?;
-                t1.format_app_term(ctx, f)
+                t1.format_ascribe_term(ctx, f)
             }
             TmIsZero(t1) => {
                 write!(f, "iszero ")?;
-                t1.format_app_term(ctx, f)
+                t1.format_ascribe_term(ctx, f)
+            }
+            _ => self.format_ascribe_term(ctx, f),
+        }
+    }
+
+    fn format_ascribe_term(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TmAscribe(t1, ty1) => {
+                t1.format_app_term(ctx, f)?;
+                write!(f, " as ")?;
+                ty1.format(ctx, f)
             }
             _ => self.format_atomic_term(ctx, f),
         }
@@ -609,20 +630,32 @@ mod parser {
     fn app_term_1(input: &str) -> IResult<&str, ParseResult<Term>> {
         alt((
             map(
-                preceded(pair(ms0, tag("fix")), atomic_term),
+                preceded(pair(ms0, tag("fix")), ascribe_term),
                 |f| -> ParseResult<_> { box move |ctx| TmFix(box f(ctx)) },
             ),
             map(
-                preceded(pair(ms0, tag("succ")), atomic_term),
+                preceded(pair(ms0, tag("succ")), ascribe_term),
                 |f| -> ParseResult<_> { box move |ctx| TmSucc(box f(ctx)) },
             ),
             map(
-                preceded(pair(ms0, tag("pred")), atomic_term),
+                preceded(pair(ms0, tag("pred")), ascribe_term),
                 |f| -> ParseResult<_> { box move |ctx| TmPred(box f(ctx)) },
             ),
             map(
-                preceded(pair(ms0, tag("iszero")), atomic_term),
+                preceded(pair(ms0, tag("iszero")), ascribe_term),
                 |f| -> ParseResult<_> { box move |ctx| TmIsZero(box f(ctx)) },
+            ),
+            ascribe_term,
+        ))(input)
+    }
+
+    fn ascribe_term(input: &str) -> IResult<&str, ParseResult<Term>> {
+        alt((
+            map(
+                tuple((atomic_term, ms1, tag("as"), ms1, all_type)),
+                |(ft, _, _, _, fty)| -> ParseResult<_> {
+                    box move |ctx| TmAscribe(box ft(ctx), fty(ctx))
+                },
             ),
             atomic_term,
         ))(input)
@@ -711,7 +744,11 @@ fn test() {
         ("(λ x: Bool. unit) true", "unit", "Unit"),
         // Seq
         ("(unit; 42)", "42", "Nat"),
-        ("λ x: Bool. (unit; 42)", "λ x: Bool. (λ _: Unit. 42) unit", "Bool -> Nat"),
+        (
+            "λ x: Bool. (unit; 42)",
+            "λ x: Bool. (λ _: Unit. 42) unit",
+            "Bool -> Nat",
+        ),
         // Nat
         ("(λ x: Nat. succ x) 41", "42", "Nat"),
         ("(λ x: Nat. if iszero x then 42 else 0) 0", "42", "Nat"),
@@ -741,7 +778,10 @@ fn test() {
             ",
             "120",
             "Nat",
-        )
+        ),
+        // As
+        ("true as Bool", "true", "Bool"),
+        ("λ x:Bool. x as Bool", "λ x: Bool. x as Bool", "Bool -> Bool"),
     ];
 
     for (input, expect_term, expect_ty) in testcases {
