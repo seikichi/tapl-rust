@@ -43,10 +43,11 @@ pub enum Term {
     TmAssign(Box<Term>, Box<Term>),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Binding {
     NameBind,
     VarBind(Ty),
+    TmAbbBind(Term, Option<Ty>),
 }
 
 #[derive(Debug)]
@@ -97,13 +98,15 @@ impl Context {
         self.bindings.iter().rev().position(|(y, _)| y == x)
     }
 
-    fn get_binding(&self, i: usize) -> &Binding {
-        &self.bindings[self.bindings.len() - i - 1].1
+    fn get_binding(&self, i: usize) -> Binding {
+        let bind = &self.bindings[self.bindings.len() - i - 1].1;
+        bind.shift(i as i32 + 1)
     }
 
-    fn get_type(&self, i: usize) -> &Ty {
+    fn get_type(&self, i: usize) -> Ty {
         match self.get_binding(i) {
             VarBind(ty) => ty,
+            TmAbbBind(_, Some(ty)) => ty,
             _ => panic!("Wrong kind of binding for variable"),
         }
     }
@@ -142,6 +145,12 @@ impl Store {
 
     fn lookup(&self, l: usize) -> &Term {
         &self.terms[l]
+    }
+
+    fn shift(&mut self, i: i32) {
+        for s in &mut self.terms {
+            *s = s.shift(i);
+        }
     }
 }
 
@@ -246,6 +255,10 @@ impl Term {
             TmLet(x, t1, t2) => Some(TmLet(x.clone(), box t1.eval1(ctx, store)?, t2.clone())),
             TmFix(box TmAbs(_, _, t12)) => Some(t12.subst_top(self)),
             TmFix(t1) if !t1.is_val(ctx) => Some(TmFix(box t1.eval1(ctx, store)?)),
+            TmVar(n) => match ctx.get_binding(*n) {
+                TmAbbBind(t, _) => Some(t.clone()),
+                _ => None,
+            },
             // Ref
             TmRef(box t1) if t1.is_val(ctx) => {
                 let l = store.extend(t1.clone());
@@ -560,6 +573,34 @@ impl Ty {
     }
 }
 
+impl Binding {
+    fn check(&self, ctx: &mut Context) -> Self {
+        match self {
+            NameBind => NameBind,
+            VarBind(ty) => VarBind(ty.clone()),
+            TmAbbBind(t, None) => TmAbbBind(t.clone(), Some(t.ty(ctx))),
+            TmAbbBind(t, Some(ty)) if t.ty(ctx) == *ty => TmAbbBind(t.clone(), Some(ty.clone())),
+            TmAbbBind(_, _) => panic!("Type of binding does not match declared type"),
+        }
+    }
+
+    fn eval(&self, ctx: &Context, store: &mut Store) -> Self {
+        match self {
+            TmAbbBind(t, ty) => TmAbbBind(t.eval(ctx, store), ty.clone()),
+            _ => (*self).clone(),
+        }
+    }
+
+    fn shift(&self, d: i32) -> Self {
+        match self {
+            NameBind => NameBind,
+            VarBind(ty) => VarBind(ty.clone()),
+            TmAbbBind(t, None) => TmAbbBind(t.shift(d), None),
+            TmAbbBind(t, Some(ty)) => TmAbbBind(t.shift(d), Some(ty.clone())),
+        }
+    }
+}
+
 impl fmt::Display for Term {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.format(&mut Context::new(), f)
@@ -577,6 +618,7 @@ impl fmt::Display for Binding {
         match self {
             NameBind => Ok(()),
             VarBind(ty) => write!(f, ": {}", ty),
+            TmAbbBind(t, _) => write!(f, "= {}", t),
         }
     }
 }
@@ -622,10 +664,16 @@ mod parser {
     }
 
     fn binder(input: &str) -> IResult<&str, ParseResult<Binding>> {
-        map(
-            preceded(tuple((ms0, char(':'), ms0)), all_type),
-            |f| -> ParseResult<_> { box move |ctx| VarBind(f(ctx)) },
-        )(input)
+        alt((
+            map(
+                preceded(tuple((ms0, char(':'), ms0)), all_type),
+                |f| -> ParseResult<_> { box move |ctx| VarBind(f(ctx)) },
+            ),
+            map(
+                preceded(tuple((ms0, char('='), ms0)), term),
+                |f| -> ParseResult<_> { box move |ctx| TmAbbBind(f(ctx), None) },
+            ),
+        ))(input)
     }
 
     fn all_type(input: &str) -> IResult<&str, ParseResult<Ty>> {
@@ -957,6 +1005,9 @@ fn test() {
         ("λ x:Bool. x as Bool", "λ x: Bool. x as Bool", "Bool -> Bool"),
         // Ref
         ("let r = ref 40 in (r := succ(!r); r := succ(!r); !r)", "42", "Nat"),
+        // TmAbbBind
+        ("x = 41; succ x", "42", "Nat"),
+        ("r = ref 40; r := succ(!r); r := succ(!r); !r", "42", "Nat"),
     ];
 
     for (input, expect_term, expect_ty) in testcases {
@@ -970,7 +1021,11 @@ fn test() {
         for c in commands {
             match c {
                 Command::Eval(t) => result = Some(t.eval(&ctx, &mut store)),
-                Command::Bind(s, b) => ctx.add_binding(s, b),
+                Command::Bind(s, b) => {
+                    let b = b.check(&mut ctx).eval(&ctx, &mut store);
+                    ctx.add_binding(s, b);
+                    store.shift(1)
+                }
             }
         }
 
@@ -996,8 +1051,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{} : {}", t.eval(&ctx, &mut store), t.ty(&mut ctx));
             }
             Command::Bind(s, b) => {
+                let b = b.check(&mut ctx).eval(&ctx, &mut store);
                 println!("> {} {}", s, b);
                 ctx.add_binding(s, b);
+                store.shift(1);
             }
         }
     }

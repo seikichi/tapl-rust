@@ -1,5 +1,5 @@
 [package]
-name = "simple"
+name = "fullref"
 version = "0.1.0"
 authors = ["Seikichi KONDO <seikichi@kmc.gr.jp>"]
 edition = "2018"
