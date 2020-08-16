@@ -654,8 +654,9 @@ mod parser {
                 pair(preceded(ms0, identifier), binder),
                 |(id, f)| -> ParseResult<_> {
                     box move |ctx| {
+                        let result = Bind(id.clone(), f(ctx));
                         ctx.add_name(id.clone());
-                        Bind(id.clone(), f(ctx))
+                        result
                     }
                 },
             ),
@@ -888,7 +889,7 @@ mod parser {
                 map(tag("false"), |_| -> ParseResult<_> { box |_| TmFalse }),
                 map(tag("unit"), |_| -> ParseResult<_> { box |_| TmUnit }),
                 map(identifier, |s| -> ParseResult<_> {
-                    box move |ctx| TmVar(ctx.name2index(&s).unwrap())
+                    box move |ctx| TmVar(ctx.name2index(&s).expect(&format!("{} not found", s)))
                 }),
                 delimited(char('('), term_seq, char(')')),
                 // String
@@ -1008,6 +1009,16 @@ fn test() {
         // TmAbbBind
         ("x = 41; succ x", "42", "Nat"),
         ("r = ref 40; r := succ(!r); r := succ(!r); !r", "42", "Nat"),
+        (
+            "
+            z = 0;
+            plus = fix (λ f: Nat -> Nat -> Nat. λ m: Nat. λ n: Nat. if iszero m then n else succ (f (pred m) n));
+            times = fix (λ f: Nat -> Nat -> Nat. λ m: Nat. λ n: Nat. if iszero m then z else plus n (f (pred m) n));
+            times 6 7
+            ",
+            "42",
+            "Nat"
+        )
     ];
 
     for (input, expect_term, expect_ty) in testcases {
