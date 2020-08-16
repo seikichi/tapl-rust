@@ -13,6 +13,7 @@ pub enum Ty {
     TyString,
     TyFloat,
     TyRef(Box<Ty>),
+    TyRecord(Vec<(String, Ty)>),
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +37,8 @@ pub enum Term {
     TmAscribe(Box<Term>, Ty),
     TmLet(String, Box<Term>, Box<Term>),
     TmFix(Box<Term>),
+    TmRecord(Vec<(String, Term)>),
+    TmProj(Box<Term>, String),
     // Ref
     TmLoc(usize),
     TmRef(Box<Term>),
@@ -179,6 +182,13 @@ impl Term {
             TmAscribe(t1, ty) => TmAscribe(box t1.map(c, onvar), ty.clone()),
             TmLet(x, t1, t2) => TmLet(x.clone(), box t1.map(c, onvar), box t2.map(c + 1, onvar)),
             TmFix(t1) => TmFix(box t1.map(c, onvar)),
+            TmRecord(fields) => TmRecord(
+                fields
+                    .iter()
+                    .map(|(li, ti)| (li.clone(), ti.map(c, onvar)))
+                    .collect(),
+            ),
+            TmProj(t1, l) => TmProj(box t1.map(c, onvar), l.clone()),
             // Ref
             TmLoc(l) => TmLoc(*l),
             TmRef(t1) => TmRef(box t1.map(c, onvar)),
@@ -222,6 +232,7 @@ impl Term {
             TmTrue | TmFalse | TmAbs(_, _, _) | TmUnit | TmString(_) | TmFloat(_) | TmLoc(_) => {
                 true
             }
+            TmRecord(fields) => fields.iter().all(|(_, ti)| ti.is_val(ctx)),
             _ if self.is_numeric_val(ctx) => true,
             _ => false,
         }
@@ -275,6 +286,33 @@ impl Term {
                 Some(TmAssign(v1.clone(), box t2.eval1(ctx, store)?))
             }
             TmAssign(t1, t2) => Some(TmAssign(box t1.eval1(ctx, store)?, t2.clone())),
+            // Record
+            TmRecord(fields) => {
+                let mut nfields = vec![];
+                let mut all_value = true;
+
+                for (li, ti) in fields {
+                    if all_value && !ti.is_val(ctx) {
+                        all_value = false;
+                        nfields.push((li.clone(), ti.eval1(ctx, store)?));
+                    } else {
+                        nfields.push((li.clone(), ti.clone()));
+                    }
+                }
+
+                if all_value {
+                    None
+                } else {
+                    Some(TmRecord(nfields))
+                }
+            }
+            TmProj(box TmRecord(fields), l) if fields.iter().all(|(_, ti)| ti.is_val(ctx)) => {
+                fields
+                    .iter()
+                    .find(|(li, _)| li == l)
+                    .map(|(_, ti)| ti.clone())
+            }
+            TmProj(t1, l) => Some(TmProj(box t1.eval1(ctx, store)?, l.clone())),
             // Other
             _ => None,
         }
@@ -413,6 +451,22 @@ impl Term {
                 }
                 panic!("arguments of ! is not a Ref");
             }
+            // Record
+            TmRecord(fields) => TyRecord(
+                fields
+                    .iter()
+                    .map(|(li, ti)| (li.clone(), ti.ty(ctx)))
+                    .collect(),
+            ),
+            TmProj(t1, l) => {
+                if let TyRecord(fields) = t1.ty(ctx) {
+                    if let Some((_, tyi)) = fields.iter().find(|(li, _)| li == l) {
+                        return tyi.clone();
+                    }
+                    panic!("label {} not found", l);
+                }
+                panic!("Expected record type");
+            }
         }
     }
 
@@ -481,6 +535,16 @@ impl Term {
                 write!(f, "!")?;
                 t1.format_atomic_term(ctx, f)
             }
+            _ => self.format_path_term(ctx, f),
+        }
+    }
+
+    fn format_path_term(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TmProj(t1, l) => {
+                t1.format_atomic_term(ctx, f)?;
+                write!(f, ".{}", l)
+            }
             _ => self.format_ascribe_term(ctx, f),
         }
     }
@@ -526,6 +590,18 @@ impl Term {
                 }
             }
             TmLoc(l) => write!(f, "<loc #{}>", l),
+            TmRecord(fields) => {
+                write!(f, "{{")?;
+                if fields.len() >= 1 {
+                    write!(f, "{} = ", fields[0].0)?;
+                    fields[0].1.format(ctx, f)?;
+                    for (li, ti) in &fields[1..] {
+                        write!(f, ", {} = ", li)?;
+                        ti.format(ctx, f)?;
+                    }
+                }
+                write!(f, "}}")
+            }
             _ => {
                 write!(f, "(")?;
                 self.format(ctx, f)?;
@@ -563,6 +639,18 @@ impl Ty {
             TyRef(ty) => {
                 write!(f, "Ref ")?;
                 ty.format_atomic_ty(ctx, f)
+            }
+            TyRecord(fields) => {
+                write!(f, "{{")?;
+                if fields.len() >= 1 {
+                    write!(f, "{}: ", fields[0].0)?;
+                    fields[0].1.format(ctx, f)?;
+                    for (li, ti) in &fields[1..] {
+                        write!(f, ", {}: ", li)?;
+                        ti.format(ctx, f)?;
+                    }
+                }
+                write!(f, "}}")
             }
             TyArr(_, _) => {
                 write!(f, "(")?;
@@ -817,37 +905,53 @@ mod parser {
     fn app_term_1(input: &str) -> IResult<&str, ParseResult<Term>> {
         alt((
             map(
-                preceded(pair(ms0, tag("fix")), ascribe_term),
+                preceded(pair(ms0, tag("fix")), path_term),
                 |f| -> ParseResult<_> { box move |ctx| TmFix(box f(ctx)) },
             ),
             map(
-                preceded(pair(ms0, tag("succ")), ascribe_term),
+                preceded(pair(ms0, tag("succ")), path_term),
                 |f| -> ParseResult<_> { box move |ctx| TmSucc(box f(ctx)) },
             ),
             map(
-                preceded(pair(ms0, tag("pred")), ascribe_term),
+                preceded(pair(ms0, tag("pred")), path_term),
                 |f| -> ParseResult<_> { box move |ctx| TmPred(box f(ctx)) },
             ),
             map(
-                preceded(pair(ms0, tag("iszero")), ascribe_term),
+                preceded(pair(ms0, tag("iszero")), path_term),
                 |f| -> ParseResult<_> { box move |ctx| TmIsZero(box f(ctx)) },
             ),
             map(
-                tuple((pair(ms0, tag("timesfloat")), ascribe_term, ascribe_term)),
+                tuple((pair(ms0, tag("timesfloat")), path_term, path_term)),
                 |(_, f1, f2)| -> ParseResult<_> {
                     box move |ctx| TmTimesFloat(box f1(ctx), box f2(ctx))
                 },
             ),
             map(
-                preceded(pair(ms0, tag("ref")), ascribe_term),
+                preceded(pair(ms0, tag("ref")), path_term),
                 |f| -> ParseResult<_> { box move |ctx| TmRef(box f(ctx)) },
             ),
             map(
-                preceded(pair(ms0, tag("!")), ascribe_term),
+                preceded(pair(ms0, tag("!")), path_term),
                 |f| -> ParseResult<_> { box move |ctx| TmDeref(box f(ctx)) },
             ),
-            ascribe_term,
+            path_term,
         ))(input)
+    }
+
+    fn path_term(input: &str) -> IResult<&str, ParseResult<Term>> {
+        map(
+            pair(ascribe_term, many0(preceded(pair(ms0, char('.')), label))),
+            |(tf, ls)| -> ParseResult<_> {
+                box move |ctx| ls.iter().fold(tf(ctx), |t, li| TmProj(box t, li.clone()))
+            },
+        )(input)
+    }
+
+    fn label(input: &str) -> IResult<&str, String> {
+        preceded(
+            ms0,
+            alt((identifier, map(digit1, |s: &str| s.parse().unwrap()))),
+        )(input)
     }
 
     fn ascribe_term(input: &str) -> IResult<&str, ParseResult<Term>> {
@@ -891,7 +995,7 @@ mod parser {
                 map(identifier, |s| -> ParseResult<_> {
                     box move |ctx| TmVar(ctx.name2index(&s).expect(&format!("{} not found", s)))
                 }),
-                delimited(char('('), term_seq, char(')')),
+                delimited(char('('), term_seq, pair(ms0, char(')'))),
                 // String
                 map(string_value, |s: String| -> ParseResult<_> {
                     box move |_| TmString(s.clone())
@@ -907,8 +1011,36 @@ mod parser {
                     }
                 }),
                 map(double, |d| -> ParseResult<_> { box move |_| TmFloat(d) }),
+                // Record
+                map(
+                    delimited(char('{'), fields, pair(ms0, char('}'))),
+                    |fs| -> ParseResult<_> { box move |ctx| TmRecord(fs(ctx)) },
+                ),
             )),
         )(input)
+    }
+
+    fn fields(input: &str) -> IResult<&str, ParseResult<Vec<(String, Term)>>> {
+        map(
+            separated_list(pair(ms0, char(',')), field),
+            |fs| -> ParseResult<_> {
+                box move |ctx| fs.iter().enumerate().map(|(i, f)| f(ctx, i + 1)).collect()
+            },
+        )(input)
+    }
+
+    type FieldResult = Box<dyn Fn(&mut Context, usize) -> (String, Term)>;
+
+    fn field(input: &str) -> IResult<&str, FieldResult> {
+        alt((
+            map(
+                tuple((label, ms0, char('='), term)),
+                |(l, _, _, f)| -> FieldResult { box move |ctx, _| (l.clone(), f(ctx)) },
+            ),
+            map(term, |f| -> FieldResult {
+                box move |ctx, i| (format!("{}", i), f(ctx))
+            }),
+        ))(input)
     }
 
     const RESERVED_KEYWORDS: &'static [&'static str] = &[
@@ -1018,7 +1150,14 @@ fn test() {
             ",
             "42",
             "Nat"
-        )
+        ),
+        // Record
+        ("{x=true, y=1}", "{x = true, y = 1}", "{x: Bool, y: Nat}"),
+        ("{x=true, y=1}.x", "true", "Bool"),
+        ("{true, 1}", "{1 = true, 2 = 1}", "{1: Bool, 2: Nat}"),
+        ("{true, 1}.1", "true", "Bool"),
+        ("{1, {2, {3}}}.2.2.1", "3", "Nat"),
+        ("{x = (λ x: Nat. succ x) 0, y = succ 10}", "{x = 1, y = 11}", "{x: Nat, y: Nat}"),
     ];
 
     for (input, expect_term, expect_ty) in testcases {
