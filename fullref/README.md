@@ -1,5 +1,23 @@
 # fullref
 
+## Features
+
+- λ
+- bool
+- nat
+- unit
+- float
+- string
+- as
+- let
+- letrec
+- fix
+- record
+- variant
+- ref
+
+## Example
+
 ```sh
 % cat test.f
 plus = fix (λ f: Nat -> Nat -> Nat. λ m: Nat. λ n: Nat. if iszero m then n else succ (f (pred m) n));
