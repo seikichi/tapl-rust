@@ -14,6 +14,7 @@ pub enum Ty {
     TyFloat,
     TyRef(Box<Ty>),
     TyRecord(Vec<(String, Ty)>),
+    TyVariant(Vec<(String, Ty)>),
 }
 
 #[derive(Debug, Clone)]
@@ -652,6 +653,18 @@ impl Ty {
                 }
                 write!(f, "}}")
             }
+            TyVariant(fields) => {
+                write!(f, "<")?;
+                if fields.len() >= 1 {
+                    write!(f, "{}: ", fields[0].0)?;
+                    fields[0].1.format(ctx, f)?;
+                    for (li, ti) in &fields[1..] {
+                        write!(f, ", {}: ", li)?;
+                        ti.format(ctx, f)?;
+                    }
+                }
+                write!(f, ">")
+            }
             TyArr(_, _) => {
                 write!(f, "(")?;
                 self.format(ctx, f)?;
@@ -792,6 +805,13 @@ mod parser {
                     delimited(char('{'), field_types, preceded(ms0, char('}'))),
                 ),
                 |f| -> ParseResult<_> { box move |ctx| TyRecord(f(ctx)) },
+            ),
+            map(
+                preceded(
+                    ms0,
+                    delimited(char('<'), field_types, preceded(ms0, char('>'))),
+                ),
+                |f| -> ParseResult<_> { box move |ctx| TyVariant(f(ctx)) },
             ),
             preceded(
                 ms0,
@@ -1191,18 +1211,19 @@ fn test() {
         ("{1, {2, {3}}}.2.2.1", "3", "Nat"),
         ("{x = (λ x: Nat. succ x) 0, y = succ 10}", "{x = 1, y = 11}", "{x: Nat, y: Nat}"),
         ("(λ r: {x: Nat, y: Bool}. r.x) {x = 42, y = true}", "42", "Nat"),
+        // Variant
+        ("λ x: <a: Bool, b: Bool>. x", "λ x: <a: Bool, b: Bool>. x", "<a: Bool, b: Bool> -> <a: Bool, b: Bool>"),
         // Other
         (
             "
-            counter = λ c: Nat. let v = ref c in {inc=λ u: Unit. (v := succ (!v); !v)};
+            counter = λ c: Nat. let v = ref c in {inc=λ u: Unit. (v := succ (!v); !v), dec=λ u: Unit. (v := pred (!v); !v)};
             c = counter 10;
             c.inc unit;
             c.inc unit;
+            c.dec unit;
             c.inc unit;
-            c.inc unit;
-            c.inc unit
             ",
-            "15",
+            "12",
             "Nat",
         ),
     ];
