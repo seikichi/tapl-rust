@@ -1191,6 +1191,20 @@ fn test() {
         ("{1, {2, {3}}}.2.2.1", "3", "Nat"),
         ("{x = (λ x: Nat. succ x) 0, y = succ 10}", "{x = 1, y = 11}", "{x: Nat, y: Nat}"),
         ("(λ r: {x: Nat, y: Bool}. r.x) {x = 42, y = true}", "42", "Nat"),
+        // Other
+        (
+            "
+            counter = λ c: Nat. let v = ref c in {inc=λ u: Unit. (v := succ (!v); !v)};
+            c = counter 10;
+            c.inc unit;
+            c.inc unit;
+            c.inc unit;
+            c.inc unit;
+            c.inc unit
+            ",
+            "15",
+            "Nat",
+        ),
     ];
 
     for (input, expect_term, expect_ty) in testcases {
