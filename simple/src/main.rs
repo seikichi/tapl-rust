@@ -11,6 +11,7 @@ pub enum Ty {
     TyNat,
     TyUnit,
     TyString,
+    TyFloat,
 }
 
 #[derive(Debug, Clone)]
@@ -26,11 +27,11 @@ pub enum Term {
     TmSucc(Box<Term>),
     TmPred(Box<Term>),
     TmIsZero(Box<Term>),
-    // String
-    TmString(String),
-    // Unit
-    TmUnit,
     // Extension
+    TmUnit,
+    TmString(String),
+    TmFloat(f64),
+    TmTimesFloat(Box<Term>, Box<Term>),
     TmAscribe(Box<Term>, Ty),
     TmLet(String, Box<Term>, Box<Term>),
     TmFix(Box<Term>),
@@ -131,11 +132,11 @@ impl Term {
             TmSucc(t1) => TmSucc(box t1.map(c, onvar)),
             TmPred(t1) => TmPred(box t1.map(c, onvar)),
             TmIsZero(t1) => TmIsZero(box t1.map(c, onvar)),
-            // String
-            TmString(s) => TmString(s.clone()),
-            // Unit
-            TmUnit => TmUnit,
             // Extension
+            TmUnit => TmUnit,
+            TmString(s) => TmString(s.clone()),
+            TmFloat(f) => TmFloat(*f),
+            TmTimesFloat(t1, t2) => TmTimesFloat(box t1.map(c, onvar), box t2.map(c, onvar)),
             TmAscribe(t1, ty) => TmAscribe(box t1.map(c, onvar), ty.clone()),
             TmLet(x, t1, t2) => TmLet(x.clone(), box t1.map(c, onvar), box t2.map(c + 1, onvar)),
             TmFix(t1) => TmFix(box t1.map(c, onvar)),
@@ -174,7 +175,7 @@ impl Term {
 
     fn is_val(&self, ctx: &Context) -> bool {
         match self {
-            TmTrue | TmFalse | TmAbs(_, _, _) | TmUnit | TmString(_) => true,
+            TmTrue | TmFalse | TmAbs(_, _, _) | TmUnit | TmString(_) | TmFloat(_) => true,
             _ if self.is_numeric_val(ctx) => true,
             _ => false,
         }
@@ -197,6 +198,11 @@ impl Term {
             TmIsZero(box TmSucc(nv1)) if nv1.is_numeric_val(ctx) => Some(TmFalse),
             TmIsZero(t1) => Some(TmIsZero(box t1.eval1(ctx)?)),
             // Extension
+            TmTimesFloat(box TmFloat(f1), box TmFloat(f2)) => Some(TmFloat(*f1 * *f2)),
+            TmTimesFloat(box TmFloat(f1), t2) => {
+                Some(TmTimesFloat(box TmFloat(*f1), box t2.eval1(ctx)?))
+            }
+            TmTimesFloat(t1, t2) => Some(TmTimesFloat(box t1.eval1(ctx)?, (*t2).clone())),
             TmAscribe(v1, _) if v1.is_val(ctx) => Some((**v1).clone()),
             TmAscribe(t1, ty) => Some(TmAscribe(box t1.eval1(ctx)?, ty.clone())),
             TmLet(_, v1, t2) if v1.is_val(ctx) => Some(t2.subst_top(v1)),
@@ -273,6 +279,16 @@ impl Term {
             TmUnit => TyUnit,
             // String
             TmString(_) => TyString,
+            // Float
+            TmFloat(_) => TyFloat,
+            TmTimesFloat(t1, t2) => {
+                if let TyFloat = t1.ty(ctx) {
+                    if let TyFloat = t2.ty(ctx) {
+                        return TyFloat;
+                    }
+                }
+                panic!("argument of timesfloat is not a number");
+            }
             // Nat
             TmZero => TyNat,
             TmSucc(t1) => {
@@ -349,16 +365,23 @@ impl Term {
             TmApp(t1, t2) => {
                 t1.format_app_term(ctx, f)?;
                 write!(f, " ")?;
-                t2.format_ascribe_term(ctx, f)
+                t2.format_atomic_term(ctx, f)
             }
             // Nat
             TmPred(t1) => {
                 write!(f, "pred ")?;
-                t1.format_ascribe_term(ctx, f)
+                t1.format_atomic_term(ctx, f)
             }
             TmIsZero(t1) => {
                 write!(f, "iszero ")?;
-                t1.format_ascribe_term(ctx, f)
+                t1.format_atomic_term(ctx, f)
+            }
+            // Float
+            TmTimesFloat(t1, t2) => {
+                write!(f, "timesfloat ")?;
+                t1.format_atomic_term(ctx, f)?;
+                write!(f, " ")?;
+                t2.format_atomic_term(ctx, f)
             }
             _ => self.format_ascribe_term(ctx, f),
         }
@@ -382,6 +405,7 @@ impl Term {
             TmFalse => write!(f, "false"),
             TmUnit => write!(f, "unit"),
             TmString(s) => write!(f, "\"{}\"", s),
+            TmFloat(d) => write!(f, "{}", d),
             TmZero => write!(f, "0"),
             TmSucc(t1) => {
                 let mut t = t1;
@@ -435,6 +459,7 @@ impl Ty {
             TyBool => write!(f, "Bool"),
             TyUnit => write!(f, "Unit"),
             TyString => write!(f, "String"),
+            TyFloat => write!(f, "Float"),
             TyNat => write!(f, "Nat"),
             TyArr(_, _) => {
                 write!(f, "(")?;
@@ -475,8 +500,9 @@ mod parser {
         character::complete::{
             alpha1, alphanumeric0, char, digit1, multispace0 as ms0, multispace1 as ms1, none_of,
         },
-        combinator::{map, verify},
+        combinator::{map, not, peek, verify},
         multi::{many0, separated_list, separated_nonempty_list},
+        number::complete::double,
         sequence::{delimited, pair, preceded, tuple},
         IResult,
     };
@@ -526,6 +552,9 @@ mod parser {
             }),
             map(preceded(ms0, tag("String")), |_| -> ParseResult<_> {
                 box |_ctx| TyString
+            }),
+            map(preceded(ms0, tag("Float")), |_| -> ParseResult<_> {
+                box |_ctx| TyFloat
             }),
             map(preceded(ms0, tag("Nat")), |_| -> ParseResult<_> {
                 box |_ctx| TyNat
@@ -657,6 +686,12 @@ mod parser {
                 preceded(pair(ms0, tag("iszero")), ascribe_term),
                 |f| -> ParseResult<_> { box move |ctx| TmIsZero(box f(ctx)) },
             ),
+            map(
+                tuple((pair(ms0, tag("timesfloat")), ascribe_term, ascribe_term)),
+                |(_, f1, f2)| -> ParseResult<_> {
+                    box move |ctx| TmTimesFloat(box f1(ctx), box f2(ctx))
+                },
+            ),
             ascribe_term,
         ))(input)
     }
@@ -717,6 +752,7 @@ mod parser {
                         result
                     }
                 }),
+                map(double, |d| -> ParseResult<_> { box move |_| TmFloat(d) }),
             )),
         )(input)
     }
@@ -735,7 +771,9 @@ mod parser {
     }
 
     fn int_value(input: &str) -> IResult<&str, u32> {
-        map(digit1, |s: &str| s.parse().unwrap())(input)
+        map(pair(digit1, not(peek(char('.')))), |(s, _): (&str, _)| {
+            s.parse().unwrap()
+        })(input)
     }
 
     fn string_value(input: &str) -> IResult<&str, String> {
@@ -778,6 +816,10 @@ fn test() {
         // String
         (r#""hello""#, r#""hello""#, "String"),
         (r#"λ x: Bool. "hello""#, r#"λ x: Bool. "hello""#, "Bool -> String"),
+        // Float
+        ("1.2", "1.2", "Float"),
+        ("timesfloat 2.5 2.0", "5", "Float"),
+        ("λ x: Float. timesfloat x 2.0", "λ x: Float. timesfloat x 2", "Float -> Float"),
         // Let
         ("let x=true in x", "true", "Bool"),
         ("let x=0 in let f=λ x: Nat. succ x in f x", "1", "Nat"),
