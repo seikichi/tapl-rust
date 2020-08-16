@@ -40,6 +40,9 @@ pub enum Term {
     TmFix(Box<Term>),
     TmRecord(Vec<(String, Term)>),
     TmProj(Box<Term>, String),
+    // Variant
+    TmTag(String, Box<Term>, Ty),
+    TmCase(Box<Term>, Vec<(String, (String, Term))>),
     // Ref
     TmLoc(usize),
     TmRef(Box<Term>),
@@ -195,6 +198,15 @@ impl Term {
                     .collect(),
             ),
             TmProj(t1, l) => TmProj(box t1.map(c, onvar), l.clone()),
+            // Variant
+            TmTag(l, t1, ty) => TmTag(l.clone(), box t1.map(c, onvar), ty.clone()),
+            TmCase(t, cases) => TmCase(
+                box t.map(c, onvar),
+                cases
+                    .iter()
+                    .map(|(li, (xi, ti))| (li.clone(), (xi.clone(), ti.map(c + 1, onvar))))
+                    .collect(),
+            ),
             // Ref
             TmLoc(l) => TmLoc(*l),
             TmRef(t1) => TmRef(box t1.map(c, onvar)),
@@ -319,6 +331,7 @@ impl Term {
                     .map(|(_, ti)| ti.clone())
             }
             TmProj(t1, l) => Some(TmProj(box t1.eval1(ctx, store)?, l.clone())),
+            // Variant (Tag, Case) T.B.D.
             // Other
             _ => None,
         }
@@ -473,6 +486,25 @@ impl Term {
                 }
                 panic!("Expected record type");
             }
+            // Variant
+            TmTag(li, ti, ty) => {
+                if let TyVariant(field_types) = ty {
+                    if let Some(expected_ty) =
+                        field_types.iter().find(|(l, _)| l == li).map(|(_, ty)| ty)
+                    {
+                        if &ti.ty(ctx) == expected_ty {
+                            return ty.clone();
+                        }
+                        panic!("field does not have expected type");
+                    }
+                    panic!("label not found");
+                }
+                panic!("Annotation is not a variant type");
+            }
+            TmCase(t, _cases) => {
+                if let TyVariant(_field_types) = t.ty(ctx) {}
+                panic!("Expected variant type");
+            }
         }
     }
 
@@ -499,6 +531,23 @@ impl Term {
             TmFix(t1) => {
                 write!(f, "fix ")?;
                 t1.format(ctx, f)
+            }
+            TmCase(t, cases) => {
+                write!(f, "case ")?;
+                t.format(ctx, f)?;
+                write!(f, " of")?;
+
+                let (l0, (x0, t0)) = &cases[0];
+                write!(f, "<{} = {}> => ", l0, x0)?;
+                t0.format(ctx, f)?;
+
+                for (li, (xi, ti)) in &cases[1..] {
+                    write!(f, " | ")?;
+                    write!(f, "<{} = {}> => ", li, xi)?;
+                    ti.format(ctx, f)?;
+                }
+
+                write!(f, "")
             }
             TmAssign(t1, t2) => {
                 t1.format_app_term(ctx, f)?;
@@ -540,6 +589,13 @@ impl Term {
             TmDeref(t1) => {
                 write!(f, "!")?;
                 t1.format_atomic_term(ctx, f)
+            }
+            // Variant
+            TmTag(l, t, ty) => {
+                write!(f, "<{} = ", l)?;
+                t.format(ctx, f)?;
+                write!(f, "> as ")?;
+                ty.format(ctx, f)
             }
             _ => self.format_path_term(ctx, f),
         }
@@ -1120,6 +1176,21 @@ mod parser {
                     delimited(char('{'), fields, pair(ms0, char('}'))),
                     |fs| -> ParseResult<_> { box move |ctx| TmRecord(fs(ctx)) },
                 ),
+                // Tag
+                map(
+                    tuple((
+                        char('<'),
+                        label,
+                        preceded(ms0, char('=')),
+                        term,
+                        preceded(ms0, char('>')),
+                        preceded(ms0, tag("as")),
+                        all_type,
+                    )),
+                    |(_, l, _, ft, _, _, fty)| -> ParseResult<_> {
+                        box move |ctx| TmTag(l.clone(), box ft(ctx), fty(ctx))
+                    },
+                ),
             )),
         )(input)
     }
@@ -1265,6 +1336,7 @@ fn test() {
         ("(λ r: {x: Nat, y: Bool}. r.x) {x = 42, y = true}", "42", "Nat"),
         // Variant
         ("λ x: <a: Bool, b: Bool>. x", "λ x: <a: Bool, b: Bool>. x", "<a: Bool, b: Bool> -> <a: Bool, b: Bool>"),
+        ("<x = 10> as <x: Nat, b: Bool>", "<x = 10> as <x: Nat, b: Bool>", "<x: Nat, b: Bool>"),
         // Other
         (
             "
