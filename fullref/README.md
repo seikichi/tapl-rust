@@ -39,7 +39,9 @@ o1 = <some = 10> as <some: Nat, none: Unit>;
 o2 = <none = unit> as <some: Nat, none: Unit>;
 s o1;
 s o2
+```
 
+```
 % cargo run -- test.f
 > plus = λ m: Nat. λ n: Nat. if iszero m then n else (succ ((fix λ f: Nat -> Nat -> Nat. λ m': Nat. λ n': Nat. if iszero m' then n' else (succ (f (pred m') n'))) (pred m) n))
 > times = λ m: Nat. λ n: Nat. if iszero m then 0 else plus n ((fix λ f: Nat -> Nat -> Nat. λ m': Nat. λ n': Nat. if iszero m' then 0 else plus n' (f (pred m') n')) (pred m) n)
