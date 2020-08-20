@@ -250,6 +250,7 @@ impl Term {
             TmTrue | TmFalse | TmAbs(_, _, _) | TmUnit | TmString(_) | TmFloat(_) | TmLoc(_) => {
                 true
             }
+            TmTag(_, t1, _) if t1.is_val(ctx) => true,
             TmRecord(fields) => fields.iter().all(|(_, ti)| ti.is_val(ctx)),
             _ if self.is_numeric_val(ctx) => true,
             _ => false,
@@ -331,7 +332,13 @@ impl Term {
                     .map(|(_, ti)| ti.clone())
             }
             TmProj(t1, l) => Some(TmProj(box t1.eval1(ctx, store)?, l.clone())),
-            // Variant (Tag, Case) T.B.D.
+            // Variant
+            TmTag(l, t1, ty) => Some(TmTag(l.clone(), box t1.eval1(ctx, store)?, ty.clone())),
+            TmCase(box TmTag(li, v11, _), branches) if v11.is_val(ctx) => {
+                let (_, body) = branches.iter().find(|(l, _)| l == li).map(|(_, v)| v)?;
+                Some(body.subst_top(v11))
+            }
+            TmCase(t1, branches) => Some(TmCase(box t1.eval1(ctx, store)?, branches.clone())),
             // Other
             _ => None,
         }
@@ -501,8 +508,24 @@ impl Term {
                 }
                 panic!("Annotation is not a variant type");
             }
-            TmCase(t, _cases) => {
-                if let TyVariant(_field_types) = t.ty(ctx) {}
+            TmCase(t, cases) => {
+                if let TyVariant(field_types) = t.ty(ctx) {
+                    let case_types = cases
+                        .iter()
+                        .map(|(li, (xi, ti))| -> Ty {
+                            let ty = field_types
+                                .iter()
+                                .find(|(l, _)| l == li)
+                                .map(|(_, ty)| ty)
+                                .unwrap();
+                            ctx.with_binding(xi.clone(), VarBind(ty.clone()), |ctx| ti.ty(ctx))
+                        })
+                        .collect::<Vec<_>>();
+                    if !&case_types.windows(2).all(|tys| tys[0] == tys[1]) {
+                        panic!("same type expected");
+                    }
+                    return case_types[0].clone();
+                }
                 panic!("Expected variant type");
             }
         }
@@ -962,7 +985,56 @@ mod parser {
     }
 
     pub fn term(input: &str) -> IResult<&str, ParseResult<Term>> {
-        alt((if_term, lambda, let_term, letrec_term, assign, app_term))(input)
+        alt((
+            if_term,
+            lambda,
+            let_term,
+            letrec_term,
+            assign,
+            case,
+            app_term,
+        ))(input)
+    }
+
+    fn case(input: &str) -> IResult<&str, ParseResult<Term>> {
+        map(
+            tuple((
+                preceded(ms0, tag("case")),
+                term,
+                preceded(ms0, tag("of")),
+                cases,
+            )),
+            |(_, tf, _, cf)| -> ParseResult<_> { box move |ctx| TmCase(box tf(ctx), cf(ctx)) },
+        )(input)
+    }
+
+    fn cases(input: &str) -> IResult<&str, ParseResult<Vec<(String, (String, Term))>>> {
+        map(
+            separated_nonempty_list(pair(ms0, char('|')), single_case),
+            |fs| -> ParseResult<_> { box move |ctx| fs.iter().map(|f| f(ctx)).collect() },
+        )(input)
+    }
+
+    fn single_case(input: &str) -> IResult<&str, ParseResult<(String, (String, Term))>> {
+        map(
+            tuple((
+                preceded(ms0, char('<')),
+                label,
+                preceded(ms0, char('=')),
+                label,
+                preceded(ms0, char('>')),
+                preceded(ms0, tag("=>")),
+                app_term,
+            )),
+            |(_, l1, _, l2, _, _, ft)| -> ParseResult<_> {
+                box move |ctx| {
+                    (
+                        l1.clone(),
+                        (l2.clone(), ctx.with_name(l2.clone(), |ctx| ft(ctx))),
+                    )
+                }
+            },
+        )(input)
     }
 
     fn lambda(input: &str) -> IResult<&str, ParseResult<Term>> {
@@ -1220,7 +1292,7 @@ mod parser {
 
     const RESERVED_KEYWORDS: &'static [&'static str] = &[
         "true", "false", "if", "then", "else", "succ", "pred", "iszero", "let", "in", "fix",
-        "unit", "ref",
+        "unit", "ref", "case", "of",
     ];
 
     fn identifier(input: &str) -> IResult<&str, String> {
@@ -1337,6 +1409,22 @@ fn test() {
         // Variant
         ("λ x: <a: Bool, b: Bool>. x", "λ x: <a: Bool, b: Bool>. x", "<a: Bool, b: Bool> -> <a: Bool, b: Bool>"),
         ("<x = 10> as <x: Nat, b: Bool>", "<x = 10> as <x: Nat, b: Bool>", "<x: Nat, b: Bool>"),
+        (
+            "(λ o: <some: Nat, none: Unit>. case o of <some = n> => succ (n) | <none = u> => 0) <none = unit> as <some: Nat, none: Unit>",
+            "0",
+            "Nat",
+        ),
+        (
+            "
+            s = λ o: <some: Nat, none: Unit>.
+                  case o of <some = n> => succ (n)
+                          | <none = u> => 0;
+            o = <some = 10> as <some: Nat, none: Unit>;
+            s o;
+            ",
+            "11",
+            "Nat"
+        ),
         // Other
         (
             "

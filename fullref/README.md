@@ -34,12 +34,19 @@ c1.dec unit;
 c1.inc unit;
 c2.dec unit;
 
+s = λ o: <some: Nat, none: Unit>. case o of <some = n> => succ (n) | <none = u> => 0;
+o1 = <some = 10> as <some: Nat, none: Unit>;
+o2 = <none = unit> as <some: Nat, none: Unit>;
+s o1;
+s o2
+
 % cargo run -- test.f
 > plus = λ m: Nat. λ n: Nat. if iszero m then n else (succ ((fix λ f: Nat -> Nat -> Nat. λ m': Nat. λ n': Nat. if iszero m' then n' else (succ (f (pred m') n'))) (pred m) n))
 > times = λ m: Nat. λ n: Nat. if iszero m then 0 else plus n ((fix λ f: Nat -> Nat -> Nat. λ m': Nat. λ n': Nat. if iszero m' then 0 else plus n' (f (pred m') n')) (pred m) n)
 > factorial = λ m: Nat. if iszero m then 1 else times m ((fix λ f: Nat -> Nat. λ m': Nat. if iszero m' then 1 else times m' (f (pred m'))) (pred m))
 > factorial 4
 24 : Nat
+
 > counter = λ c: Nat. let v = ref c in {inc = λ u: Unit. (λ _: Unit. !v) (v := (succ (!v))), dec = λ u: Unit. (λ _: Unit. !v) (v := pred (!v))}
 > c1 = {inc = λ u: Unit. (λ _: Unit. !<loc #0>) (<loc #0> := (succ (!<loc #0>))), dec = λ u: Unit. (λ _: Unit. !<loc #0>) (<loc #0> := pred (!<loc #0>))}
 > c2 = {inc = λ u: Unit. (λ _: Unit. !<loc #1>) (<loc #1> := (succ (!<loc #1>))), dec = λ u: Unit. (λ _: Unit. !<loc #1>) (<loc #1> := pred (!<loc #1>))}
@@ -53,4 +60,12 @@ c2.dec unit;
 12 : Nat
 > c2.dec unit
 9 : Nat
+
+> s = λ o: <some: Nat, none: Unit>. case o of <some = n> => (succ o) | <none = u> => 0
+> o1 = <some = 10> as <some: Nat, none: Unit>
+> o2 = <none = unit> as <some: Nat, none: Unit>
+> s o1
+11 : Nat
+> s o2
+0
 ```

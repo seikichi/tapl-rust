@@ -11,3 +11,9 @@ c1.inc unit;
 c1.dec unit;
 c1.inc unit;
 c2.dec unit;
+
+s = λ o: <some: Nat, none: Unit>. case o of <some = n> => succ (n) | <none = u> => 0;
+o1 = <some = 10> as <some: Nat, none: Unit>;
+o2 = <none = unit> as <some: Nat, none: Unit>;
+s o1;
+s o2
