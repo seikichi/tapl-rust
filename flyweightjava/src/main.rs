@@ -5,8 +5,8 @@ use std::rc::Rc;
 type Symbol = Rc<str>;
 type Ty = Symbol;
 
-#[derive(Debug, Clone)]
-pub enum Term {
+#[derive(Debug, Clone, PartialEq)]
+enum Term {
     TmVar(Symbol),
     TmProj(Box<Term>, Symbol),
     TmInvk(Box<Term>, Symbol, Vec<Term>),
@@ -16,50 +16,88 @@ pub enum Term {
 
 use Term::*;
 
-pub struct ClassTable {}
+struct ClassTable {
+    classes: Vec<Class>,
+}
+
+struct Class {
+    name: Symbol,
+    parent: Symbol,
+    fields: Vec<(Symbol, Symbol)>,
+    methods: Vec<Method>,
+}
+
+struct Method {
+    name: Symbol,
+    ty: Symbol,
+    args: Vec<(Symbol, Symbol)>,
+    body: Term,
+}
 
 // NOTE: dummy implementation
 impl ClassTable {
     fn new() -> Self {
-        Self {}
+        Self { classes: vec![] }
     }
 
-    fn fields(&self, klass: &Symbol) -> Vec<(Symbol, Symbol)> {
-        if *klass == "Pair".into() {
-            return vec![
-                ("Object".into(), "fst".into()),
-                ("Object".into(), "snd".into()),
-            ];
+    fn add(&mut self, class: Class) {
+        // TODO: validation
+        self.classes.push(class);
+    }
+
+    fn fields(&self, klass: &Symbol) -> Option<Vec<(Symbol, Symbol)>> {
+        if *klass == "Object".into() {
+            return Some(vec![]);
         }
-        vec![]
+
+        let class = self.classes.iter().find(|class| class.name == *klass)?;
+        let mut result = self.fields(&class.parent)?;
+        result.extend(class.fields.clone());
+        Some(result)
     }
 
     fn mbody(&self, m: &Symbol, klass: &Symbol) -> Option<(Vec<Symbol>, Term)> {
-        if *klass == "Pair".into() && *m == "setfst".into() {
-            return Some((
-                vec!["newfst".into()],
-                TmNew(
-                    "Pair".into(),
-                    vec![
-                        TmVar("newfst".into()),
-                        TmProj(TmVar("this".into()).into(), "snd".into()),
-                    ],
-                ),
-            ));
-        }
-
-        None
+        let class = self.classes.iter().find(|class| class.name == *klass)?;
+        class
+            .methods
+            .iter()
+            .find(|method| method.name == *m)
+            .map(|method| {
+                (
+                    method.args.iter().map(|(_, xi)| xi.clone()).collect(),
+                    method.body.clone(),
+                )
+            })
+            .or_else(|| self.mbody(m, &class.parent))
     }
 
     fn mtype(&self, m: &Symbol, klass: &Symbol) -> Option<(Vec<Ty>, Ty)> {
-        if *klass == "Pair".into() && *m == "setfst".into() {
-            return Some((vec!["Object".into()], "Pair".into()));
-        }
-        None
+        let class = self.classes.iter().find(|class| class.name == *klass)?;
+        class
+            .methods
+            .iter()
+            .find(|method| method.name == *m)
+            .map(|method| {
+                (
+                    method.args.iter().map(|(mi, _)| mi.clone()).collect(),
+                    method.ty.clone(),
+                )
+            })
+            .or_else(|| self.mtype(m, &class.parent))
     }
 
     fn is_subtype(&self, c: &Symbol, d: &Symbol) -> bool {
-        *c == *d || *d == "Object".into()
+        if c == d {
+            return true;
+        }
+        if *c == "Object".into() {
+            return false;
+        }
+        self.classes
+            .iter()
+            .find(|class| class.name == *c)
+            .map(|class| self.is_subtype(&class.parent, d))
+            .unwrap_or(false)
     }
 }
 
@@ -90,7 +128,7 @@ impl Term {
         match self {
             // E-ProjNew
             TmProj(box TmNew(c, ts), f) => {
-                let i = ct.fields(c).iter().position(|(_, fi)| fi == f)?;
+                let i = ct.fields(c)?.iter().position(|(_, fi)| fi == f)?;
                 Some(ts[i].clone())
             }
             // E-InvkNew
@@ -151,7 +189,7 @@ impl Term {
             // T-Field
             TmProj(t, f) => {
                 let klass = t.ty(ct)?;
-                let fs = ct.fields(&klass);
+                let fs = ct.fields(&klass)?;
                 fs.iter().find(|(_, fi)| fi == f).map(|(c, _)| c.clone())
             }
             // T-Invk
@@ -172,7 +210,7 @@ impl Term {
             }
             // T-New
             TmNew(klass, ts) => {
-                let fs = ct.fields(klass);
+                let fs = ct.fields(klass)?;
                 if fs.len() != ts.len() {
                     return None;
                 }
@@ -222,8 +260,85 @@ impl fmt::Display for Term {
     }
 }
 
+// mod parser {
+//     use super::*;
+
+//     use nom::{
+//         branch::alt,
+//         bytes::complete::tag,
+//         character::complete::{
+//             alpha1, alphanumeric0, char, digit1, multispace0 as ms0, multispace1 as ms1, none_of,
+//         },
+//         combinator::{map, not, peek, verify},
+//         multi::{many0, separated_list, separated_nonempty_list},
+//         number::complete::double,
+//         sequence::{delimited, pair, preceded, tuple},
+//         IResult,
+//     };
+
+//     fn parse_term(input: &str) -> IResult<&str, Term> {
+//         alt((
+//             map(
+//                 tuple((parse_term, ms0, char('.'), ms0, identifier)),
+//                 |(t, _, _, _, f)| TmProj(box t, f.into()),
+//             ),
+//             map(preceded(ms0, identifier), |id| TmVar(id.into())),
+//         ))(input)
+//     }
+
+//     fn identifier(input: &str) -> IResult<&str, String> {
+//         map(pair(alpha1, alphanumeric0), |(s1, s2)| {
+//             format!("{}{}", s1, s2)
+//         })(input)
+//     }
+
+//     #[test]
+//     fn test_parse_term() {
+//         let input = "foo.bar";
+//         let result = parse_term(input);
+//         assert_eq!(
+//             result,
+//             Ok(("", TmProj(box TmVar("foo".into()), "bar".into())))
+//         );
+//     }
+// }
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // new Pair(new A(), new B()).setfst(new B())
+    let mut ct = ClassTable::new();
+    ct.add(Class {
+        name: "A".into(),
+        parent: "Object".into(),
+        fields: vec![],
+        methods: vec![],
+    });
+    ct.add(Class {
+        name: "B".into(),
+        parent: "Object".into(),
+        fields: vec![],
+        methods: vec![],
+    });
+    ct.add(Class {
+        name: "Pair".into(),
+        parent: "Object".into(),
+        fields: vec![
+            ("Object".into(), "fst".into()),
+            ("Object".into(), "snd".into()),
+        ],
+        methods: vec![Method {
+            name: "setfst".into(),
+            ty: "Object".into(),
+            args: vec![("Object".into(), "newfst".into())],
+            body: TmNew(
+                "Pair".into(),
+                vec![
+                    TmVar("newfst".into()),
+                    TmProj(TmVar("this".into()).into(), "snd".into()),
+                ],
+            ),
+        }],
+    });
+
+    // new Pair(new A(), new B()).setfst(new B()) => new Pair(new B(), new B())
     let t = TmInvk(
         TmNew(
             "Pair".into(),
@@ -233,9 +348,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "setfst".into(),
         vec![TmNew("B".into(), vec![])],
     );
-    let ct = ClassTable::new();
-    let t = t.eval(&ct);
-    println!("{}: {}", t, t.ty(&ct).unwrap());
+    let u = t.eval(&ct);
+    println!("{} => {}: {}", t, u, u.ty(&ct).unwrap());
+
+    // ((Pair) new Pair(new Pair(new A(), new B()), new A()).fst).snd => new B()
+    let t = TmProj(
+        TmCast(
+            box TmProj(
+                box TmNew(
+                    "Pair".into(),
+                    vec![
+                        TmNew(
+                            "Pair".into(),
+                            vec![TmNew("A".into(), vec![]), TmNew("B".into(), vec![])],
+                        ),
+                        TmNew("A".into(), vec![]),
+                    ],
+                ),
+                "fst".into(),
+            ),
+            "Pair".into(),
+        )
+        .into(),
+        "snd".into(),
+    );
+    let u = t.eval(&ct);
+    println!("{} => {}: {}", t, u, u.ty(&ct).unwrap());
 
     Ok(())
 }
