@@ -2,11 +2,11 @@
 use std::fmt;
 use std::rc::Rc;
 
-type Symbol = Rc<str>;
-type Ty = Symbol;
+pub type Symbol = Rc<str>;
+pub type Ty = Symbol;
 
 #[derive(Debug, Clone, PartialEq)]
-enum Term {
+pub enum Term {
     TmVar(Symbol),
     TmProj(Box<Term>, Symbol),
     TmInvk(Box<Term>, Symbol, Vec<Term>),
@@ -260,48 +260,73 @@ impl fmt::Display for Term {
     }
 }
 
-// mod parser {
-//     use super::*;
+mod parser {
+    use super::*;
 
-//     use nom::{
-//         branch::alt,
-//         bytes::complete::tag,
-//         character::complete::{
-//             alpha1, alphanumeric0, char, digit1, multispace0 as ms0, multispace1 as ms1, none_of,
-//         },
-//         combinator::{map, not, peek, verify},
-//         multi::{many0, separated_list, separated_nonempty_list},
-//         number::complete::double,
-//         sequence::{delimited, pair, preceded, tuple},
-//         IResult,
-//     };
+    use nom::{
+        branch::alt,
+        bytes::complete::tag,
+        character::complete::{
+            alpha1, alphanumeric0, char, digit1, multispace0 as ms0, multispace1 as ms1, none_of,
+        },
+        combinator::{map, not, peek, verify},
+        multi::{many0, separated_list, separated_nonempty_list},
+        number::complete::double,
+        sequence::{delimited, pair, preceded, tuple},
+        IResult,
+    };
 
-//     fn parse_term(input: &str) -> IResult<&str, Term> {
-//         alt((
-//             map(
-//                 tuple((parse_term, ms0, char('.'), ms0, identifier)),
-//                 |(t, _, _, _, f)| TmProj(box t, f.into()),
-//             ),
-//             map(preceded(ms0, identifier), |id| TmVar(id.into())),
-//         ))(input)
-//     }
+    pub fn term(input: &str) -> IResult<&str, Term> {
+        alt((new_term, atomic_term))(input)
+    }
 
-//     fn identifier(input: &str) -> IResult<&str, String> {
-//         map(pair(alpha1, alphanumeric0), |(s1, s2)| {
-//             format!("{}{}", s1, s2)
-//         })(input)
-//     }
+    fn new_term(input: &str) -> IResult<&str, Term> {
+        map(
+            tuple((ms0, tag("new"), ms1, identifier, args)),
+            |(_, _, _, class, args)| TmNew(class.into(), args),
+        )(input)
+    }
 
-//     #[test]
-//     fn test_parse_term() {
-//         let input = "foo.bar";
-//         let result = parse_term(input);
-//         assert_eq!(
-//             result,
-//             Ok(("", TmProj(box TmVar("foo".into()), "bar".into())))
-//         );
-//     }
-// }
+    fn args(input: &str) -> IResult<&str, Vec<Term>> {
+        delimited(
+            tuple((ms0, char('('), ms0)),
+            separated_list(pair(ms0, char(',')), term),
+            tuple((ms0, char(')'))),
+        )(input)
+    }
+
+    fn atomic_term(input: &str) -> IResult<&str, Term> {
+        alt((
+            map(preceded(ms0, identifier), |id| TmVar(id.into())),
+            delimited(char('('), term, pair(ms0, char(')'))),
+        ))(input)
+    }
+
+    fn identifier(input: &str) -> IResult<&str, String> {
+        map(pair(alpha1, alphanumeric0), |(s1, s2)| {
+            format!("{}{}", s1, s2)
+        })(input)
+    }
+
+    #[test]
+    fn test_parse_term() {
+        let tests = vec![
+            ("this", TmVar("this".into())),
+            ("new A()", TmNew("A".into(), vec![])),
+            (
+                "new Pair(new A(), new B())",
+                TmNew(
+                    "Pair".into(),
+                    vec![TmNew("A".into(), vec![]), TmNew("B".into(), vec![])],
+                ),
+            ),
+        ];
+        for (input, expected) in tests {
+            let result = term(input);
+            assert_eq!(result, Ok(("", expected)), "input = {:?}", input);
+        }
+    }
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ct = ClassTable::new();
@@ -337,6 +362,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
         }],
     });
+
+    let (_, t) = parser::term("new Pair(new A(), new B())")?;
+    println!("{}", t);
 
     // new Pair(new A(), new B()).setfst(new B()) => new Pair(new B(), new B())
     let t = TmInvk(
