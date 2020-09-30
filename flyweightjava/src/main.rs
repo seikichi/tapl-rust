@@ -277,7 +277,14 @@ mod parser {
     };
 
     pub fn term(input: &str) -> IResult<&str, Term> {
-        alt((new_term, atomic_term))(input)
+        alt((cast_term, path_term))(input)
+    }
+
+    fn cast_term(input: &str) -> IResult<&str, Term> {
+        map(
+            tuple((ms0, char('('), ms0, identifier, ms0, char(')'), term)),
+            |(_, _, _, class, _, _, t)| TmCast(t.into(), class.into()),
+        )(input)
     }
 
     fn new_term(input: &str) -> IResult<&str, Term> {
@@ -295,8 +302,31 @@ mod parser {
         )(input)
     }
 
+    fn path_term(input: &str) -> IResult<&str, Term> {
+        map(pair(atomic_term, many0(alt((inv, proj)))), |(t, ps)| {
+            ps.into_iter().fold(t, |t, f| f(t))
+        })(input)
+    }
+
+    fn proj(input: &str) -> IResult<&str, Box<dyn Fn(Term) -> Term>> {
+        map(
+            preceded(tuple((ms0, char('.'), ms0)), identifier),
+            |id| -> Box<dyn Fn(Term) -> Term> { box move |t| TmProj(box t, id.clone().into()) },
+        )(input)
+    }
+
+    fn inv(input: &str) -> IResult<&str, Box<dyn Fn(Term) -> Term>> {
+        map(
+            tuple((tuple((ms0, char('.'), ms0)), identifier, args)),
+            |(_, id, args)| -> Box<dyn Fn(Term) -> Term> {
+                box move |t| TmInvk(box t, id.clone().into(), args.clone())
+            },
+        )(input)
+    }
+
     fn atomic_term(input: &str) -> IResult<&str, Term> {
         alt((
+            new_term,
             map(preceded(ms0, identifier), |id| TmVar(id.into())),
             delimited(char('('), term, pair(ms0, char(')'))),
         ))(input)
@@ -318,6 +348,29 @@ mod parser {
                 TmNew(
                     "Pair".into(),
                     vec![TmNew("A".into(), vec![]), TmNew("B".into(), vec![])],
+                ),
+            ),
+            (
+                "(Object) new A()",
+                TmCast(TmNew("A".into(), vec![]).into(), "Object".into()),
+            ),
+            (
+                "new A().foo.bar",
+                TmProj(
+                    box TmProj(box TmNew("A".into(), vec![]), "foo".into()),
+                    "bar".into(),
+                ),
+            ),
+            (
+                "new A().foo(new B(), new C()).bar()",
+                TmInvk(
+                    box TmInvk(
+                        box TmNew("A".into(), vec![]),
+                        "foo".into(),
+                        vec![TmNew("B".into(), vec![]), TmNew("C".into(), vec![])],
+                    ),
+                    "bar".into(),
+                    vec![],
                 ),
             ),
         ];
