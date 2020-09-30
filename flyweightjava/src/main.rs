@@ -419,40 +419,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (_, t) = parser::term("new Pair(new A(), new B())")?;
     println!("{}", t);
 
-    // new Pair(new A(), new B()).setfst(new B()) => new Pair(new B(), new B())
-    let t = TmInvk(
-        TmNew(
-            "Pair".into(),
-            vec![TmNew("A".into(), vec![]), TmNew("B".into(), vec![])],
-        )
-        .into(),
-        "setfst".into(),
-        vec![TmNew("B".into(), vec![])],
-    );
+    // => new Pair(new B(), new B()): Pair
+    let (_, t) = parser::term("new Pair(new A(), new B()).setfst(new B())")?;
     let u = t.eval(&ct);
     println!("{} => {}: {}", t, u, u.ty(&ct).unwrap());
 
-    // ((Pair) new Pair(new Pair(new A(), new B()), new A()).fst).snd => new B()
-    let t = TmProj(
-        TmCast(
-            box TmProj(
-                box TmNew(
-                    "Pair".into(),
-                    vec![
-                        TmNew(
-                            "Pair".into(),
-                            vec![TmNew("A".into(), vec![]), TmNew("B".into(), vec![])],
-                        ),
-                        TmNew("A".into(), vec![]),
-                    ],
-                ),
-                "fst".into(),
-            ),
-            "Pair".into(),
-        )
-        .into(),
-        "snd".into(),
-    );
+    // => new B(): B
+    let (_, t) = parser::term("((Pair) new Pair(new Pair(new A(), new B()), new A()).fst).snd")?;
     let u = t.eval(&ct);
     println!("{} => {}: {}", t, u, u.ty(&ct).unwrap());
 
