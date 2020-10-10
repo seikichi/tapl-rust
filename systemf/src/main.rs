@@ -29,6 +29,8 @@ pub enum Binding {
     NameBind,
     VarBind(Ty),
     TyVarBind,
+    TyAbbBind(Ty),
+    TmAbbBind(Term, Option<Ty>),
 }
 
 #[derive(Debug)]
@@ -43,73 +45,73 @@ use Command::*;
 use Term::*;
 use Ty::*;
 
-// #[derive(Clone, Debug)]
-// pub struct Context {
-//     bindings: Vec<(String, Binding)>,
-// }
+#[derive(Clone, Debug)]
+pub struct Context {
+    bindings: Vec<(String, Binding)>,
+}
 
-// impl Context {
-//     fn new() -> Self {
-//         Self { bindings: vec![] }
-//     }
+impl Context {
+    fn new() -> Self {
+        Self { bindings: vec![] }
+    }
 
-//     fn add_binding(&mut self, x: String, bind: Binding) {
-//         self.bindings.push((x, bind));
-//     }
+    fn add_binding(&mut self, x: String, bind: Binding) {
+        self.bindings.push((x, bind));
+    }
 
-//     fn add_name(&mut self, x: String) {
-//         self.add_binding(x, NameBind);
-//     }
+    fn add_name(&mut self, x: String) {
+        self.add_binding(x, NameBind);
+    }
 
-//     fn with_binding<R, F: FnOnce(&mut Self) -> R>(&mut self, x: String, bind: Binding, f: F) -> R {
-//         self.bindings.push((x, bind));
-//         let result = f(self);
-//         self.bindings.pop();
-//         result
-//     }
+    fn with_binding<R, F: FnOnce(&mut Self) -> R>(&mut self, x: String, bind: Binding, f: F) -> R {
+        self.bindings.push((x, bind));
+        let result = f(self);
+        self.bindings.pop();
+        result
+    }
 
-//     fn with_name<R, F: FnOnce(&mut Self) -> R>(&mut self, x: String, f: F) -> R {
-//         self.with_binding(x, NameBind, f)
-//     }
+    fn with_name<R, F: FnOnce(&mut Self) -> R>(&mut self, x: String, f: F) -> R {
+        self.with_binding(x, NameBind, f)
+    }
 
-//     fn index2name(&self, x: usize) -> Option<&String> {
-//         if self.bindings.len() <= x {
-//             return None;
-//         }
-//         self.bindings
-//             .get(self.bindings.len() - x - 1)
-//             .map(|(s, _)| s)
-//     }
+    fn index2name(&self, x: usize) -> Option<&String> {
+        if self.bindings.len() <= x {
+            return None;
+        }
+        self.bindings
+            .get(self.bindings.len() - x - 1)
+            .map(|(s, _)| s)
+    }
 
-//     fn name2index(&self, x: &str) -> Option<usize> {
-//         self.bindings.iter().rev().position(|(y, _)| y == x)
-//     }
+    fn name2index(&self, x: &str) -> Option<usize> {
+        self.bindings.iter().rev().position(|(y, _)| y == x)
+    }
 
-//     fn get_binding(&self, i: usize) -> Binding {
-//         let bind = &self.bindings[self.bindings.len() - i - 1].1;
-//         bind.shift(i as i32 + 1)
-//     }
+    fn get_binding(&self, i: usize) -> Binding {
+        let bind = &self.bindings[self.bindings.len() - i - 1].1;
+        bind.shift(i as i32 + 1)
+    }
 
-//     fn get_type(&self, i: usize) -> Ty {
-//         match self.get_binding(i) {
-//             VarBind(ty) => ty,
-//             TmAbbBind(_, Some(ty)) => ty,
-//             _ => panic!("Wrong kind of binding for variable"),
-//         }
-//     }
+    fn get_type(&self, i: usize) -> Ty {
+        match self.get_binding(i) {
+            VarBind(ty) => ty,
+            TmAbbBind(_, Some(ty)) => ty,
+            _ => panic!("Wrong kind of binding for variable"),
+        }
+    }
 
-//     fn with_fresh_name<R, F: FnOnce(&mut Self, String) -> R>(&mut self, x: &str, f: F) -> R {
-//         let mut name: String = x.into();
-//         while self.is_name_bound(&name) {
-//             name.push_str("'");
-//         }
-//         self.with_name(name.clone(), move |ctx| f(ctx, name))
-//     }
+    fn with_fresh_name<R, F: FnOnce(&mut Self, String) -> R>(&mut self, x: &str, f: F) -> R {
+        let mut name: String = x.into();
+        while self.is_name_bound(&name) {
+            name.push_str("'");
+        }
+        self.with_name(name.clone(), move |ctx| f(ctx, name))
+    }
 
-//     fn is_name_bound(&self, x: &str) -> bool {
-//         self.bindings.iter().rev().any(|(s, _)| s == x)
-//     }
-// }
+    fn is_name_bound(&self, x: &str) -> bool {
+        self.bindings.iter().rev().any(|(s, _)| s == x)
+    }
+}
 
 impl Term {
     fn map<F: Copy + Fn(i32, usize) -> Self, TF: Copy + Fn(i32, &Ty) -> Ty>(
@@ -742,51 +744,53 @@ impl Ty {
     // }
 }
 
-// impl Binding {
-//     fn check(&self, ctx: &mut Context) -> Self {
-//         match self {
-//             NameBind => NameBind,
-//             VarBind(ty) => VarBind(ty.clone()),
-//             TmAbbBind(t, None) => TmAbbBind(t.clone(), Some(t.ty(ctx))),
-//             TmAbbBind(t, Some(ty)) if t.ty(ctx) == *ty => TmAbbBind(t.clone(), Some(ty.clone())),
-//             TmAbbBind(_, _) => panic!("Type of binding does not match declared type"),
-//         }
-//     }
+impl Binding {
+    // fn check(&self, ctx: &mut Context) -> Self {
+    //     match self {
+    //         NameBind => NameBind,
+    //         VarBind(ty) => VarBind(ty.clone()),
+    //         TmAbbBind(t, None) => TmAbbBind(t.clone(), Some(t.ty(ctx))),
+    //         TmAbbBind(t, Some(ty)) if t.ty(ctx) == *ty => TmAbbBind(t.clone(), Some(ty.clone())),
+    //         TmAbbBind(_, _) => panic!("Type of binding does not match declared type"),
+    //     }
+    // }
 
-//     fn eval(&self, ctx: &Context, store: &mut Store) -> Self {
-//         match self {
-//             TmAbbBind(t, ty) => TmAbbBind(t.eval(ctx, store), ty.clone()),
-//             _ => (*self).clone(),
-//         }
-//     }
+    // fn eval(&self, ctx: &Context, store: &mut Store) -> Self {
+    //     match self {
+    //         TmAbbBind(t, ty) => TmAbbBind(t.eval(ctx, store), ty.clone()),
+    //         _ => (*self).clone(),
+    //     }
+    // }
 
-//     fn shift(&self, d: i32) -> Self {
-//         match self {
-//             NameBind => NameBind,
-//             VarBind(ty) => VarBind(ty.clone()),
-//             TmAbbBind(t, None) => TmAbbBind(t.shift(d), None),
-//             TmAbbBind(t, Some(ty)) => TmAbbBind(t.shift(d), Some(ty.clone())),
-//         }
-//     }
+    fn shift(&self, d: i32) -> Self {
+        match self {
+            NameBind => NameBind,
+            TyVarBind => TyVarBind,
+            TyAbbBind(ty) => TyAbbBind(ty.shift(d)),
+            VarBind(ty) => VarBind(ty.shift(d)),
+            TmAbbBind(t, None) => TmAbbBind(t.shift(d), None),
+            TmAbbBind(t, Some(ty)) => TmAbbBind(t.shift(d), Some(ty.shift(d))),
+        }
+    }
 
-//     fn display(&self, ctx: &Context) -> BindingDisplay {
-//         BindingDisplay {
-//             b: self.clone(),
-//             ctx: ctx.clone(),
-//         }
-//     }
+    // fn display(&self, ctx: &Context) -> BindingDisplay {
+    //     BindingDisplay {
+    //         b: self.clone(),
+    //         ctx: ctx.clone(),
+    //     }
+    // }
 
-//     fn format(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         match self {
-//             NameBind => Ok(()),
-//             VarBind(ty) => write!(f, ": {}", ty),
-//             TmAbbBind(t, _) => {
-//                 write!(f, "= ")?;
-//                 t.format(ctx, f)
-//             }
-//         }
-//     }
-// }
+    // fn format(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    //     match self {
+    //         NameBind => Ok(()),
+    //         VarBind(ty) => write!(f, ": {}", ty),
+    //         TmAbbBind(t, _) => {
+    //             write!(f, "= ")?;
+    //             t.format(ctx, f)
+    //         }
+    //     }
+    // }
+}
 
 // impl fmt::Display for Term {
 //     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
