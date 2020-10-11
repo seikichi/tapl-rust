@@ -169,7 +169,7 @@ impl Term {
     }
 
     fn ty_subst(&self, j: i32, ty: &Ty) -> Self {
-        self.map(j, |_, x| TmVar(x), |j, ty2| ty.subst(j, ty2))
+        self.map(j, |_, x| TmVar(x), |j, ty2| ty2.subst(j, ty))
     }
 
     fn ty_subst_top(&self, ty: &Ty) -> Self {
@@ -205,7 +205,7 @@ impl Term {
                 _ => return None,
             },
             // TmTApp
-            TmTApp(box TmTAbs(x, t11), ty2) => t11.ty_subst_top(ty2),
+            TmTApp(box TmTAbs(_, t11), ty2) => t11.ty_subst_top(ty2),
             TmTApp(t1, ty2) => TmTApp(box t1.eval1(ctx)?, ty2.clone()),
             // Other
             _ => return None,
@@ -263,6 +263,13 @@ impl Binding {
             VarBind(ty) => VarBind(ty.shift(d)),
             TmAbbBind(t, None) => TmAbbBind(t.shift(d), None),
             TmAbbBind(t, Some(ty)) => TmAbbBind(t.shift(d), Some(ty.shift(d))),
+        }
+    }
+
+    fn eval(&self, ctx: &Context) -> Self {
+        match &self {
+            TmAbbBind(t, ty) => TmAbbBind(t.eval(ctx), ty.clone()),
+            _ => self.clone(), // FIXME
         }
     }
 }
@@ -331,6 +338,14 @@ mod parser {
         preceded(ms0, char(','))(input)
     }
 
+    fn semi(input: &str) -> IResult<&str, char> {
+        preceded(ms0, char(';'))(input)
+    }
+
+    fn eq(input: &str) -> IResult<&str, char> {
+        preceded(ms0, char('='))(input)
+    }
+
     fn lcurly(input: &str) -> IResult<&str, char> {
         preceded(ms0, char('{'))(input)
     }
@@ -366,9 +381,8 @@ mod parser {
                 tuple((lambda, lcid, colon, ty, dot, term)),
                 |(_, id, _, fty, _, ft)| -> ParseResult<Term> {
                     box move |ctx| {
-                        ctx.with_name(id.to_string(), |ctx| {
-                            TmAbs(id.clone(), fty(ctx), box ft(ctx))
-                        })
+                        let ty = fty(ctx);
+                        ctx.with_name(id.to_string(), |ctx| TmAbs(id.clone(), ty, box ft(ctx)))
                     }
                 },
             ),
@@ -376,7 +390,8 @@ mod parser {
                 tuple((lambda, char('_'), colon, ty, dot, term)),
                 |(_, _, _, fty, _, ft)| -> ParseResult<Term> {
                     box move |ctx| {
-                        ctx.with_name("_".into(), |ctx| TmAbs("_".into(), fty(ctx), box ft(ctx)))
+                        let ty = fty(ctx);
+                        ctx.with_name("_".into(), |ctx| TmAbs("_".into(), ty, box ft(ctx)))
                     }
                 },
             ),
@@ -472,7 +487,7 @@ mod parser {
                     }
                 }),
                 map(
-                    tuple((pair(lcurly, some), ucid, comma, ty, rparen)),
+                    tuple((pair(lcurly, some), ucid, comma, ty, rcurly)),
                     |(_, id, _, fty, _)| -> ParseResult<Ty> {
                         box move |ctx| {
                             ctx.with_name(id.to_string(), |ctx| TySome(id.clone(), box fty(ctx)))
@@ -483,162 +498,93 @@ mod parser {
         )(input)
     }
 
-    // #[test]
-    // fn test() {
-    //     let testcases = vec![
-    //         // Bool,
-    //         ("true", "true", "Bool"),
-    //         (
-    //             "(λ x: Bool -> Bool. if x true then true else false) (λ x: Bool. x)",
-    //             "true",
-    //             "Bool",
-    //         ),
-    //         (
-    //             "(λ x: Bool -> Bool -> Bool. x true false) (λ x: Bool. λ y: Bool. true)",
-    //             "true",
-    //             "Bool",
-    //         ),
-    //         // Unit
-    //         ("unit", "unit", "Unit"),
-    //         ("λ x: Bool. unit", "λ x: Bool. unit", "Bool -> Unit"),
-    //         ("(λ x: Bool. unit) true", "unit", "Unit"),
-    //         // Seq
-    //         ("(unit; 42)", "42", "Nat"),
-    //         (
-    //             "λ x: Bool. (unit; 42)",
-    //             "λ x: Bool. (λ _: Unit. 42) unit",
-    //             "Bool -> Nat",
-    //         ),
-    //         // Nat
-    //         ("(λ x: Nat. succ x) 41", "42", "Nat"),
-    //         ("(λ x: Nat. if iszero x then 42 else 0) 0", "42", "Nat"),
-    //         ("(λ x: Nat. if iszero x then 42 else 0) 1", "0", "Nat"),
-    //         // String
-    //         (r#""hello""#, r#""hello""#, "String"),
-    //         (r#"λ x: Bool. "hello""#, r#"λ x: Bool. "hello""#, "Bool -> String"),
-    //         // Float
-    //         ("1.2", "1.2", "Float"),
-    //         ("timesfloat 2.5 2.0", "5", "Float"),
-    //         ("λ x: Float. timesfloat x 2.0", "λ x: Float. timesfloat x 2", "Float -> Float"),
-    //         // Let
-    //         ("let x=true in x", "true", "Bool"),
-    //         ("let x=0 in let f=λ x: Nat. succ x in f x", "1", "Nat"),
-    //         // Fix
-    //         (
-    //             "(fix (λ f: Nat -> Nat -> Nat. λ m: Nat. λ n: Nat. if iszero m then n else succ (f (pred m) n))) 40 2",
-    //             "42",
-    //             "Nat",
-    //         ),
-    //         // Letrec
-    //         (
-    //             "
-    //             letrec plus: Nat -> Nat -> Nat =
-    //               λ m: Nat. λ n: Nat.
-    //                 if iszero m then n else succ (plus (pred m) n) in
-    //             letrec times: Nat -> Nat -> Nat =
-    //               λ m: Nat. λ n: Nat.
-    //                 if iszero m then 0 else plus n (times (pred m) n) in
-    //             letrec factorial: Nat -> Nat =
-    //               λ m: Nat.
-    //                 if iszero m then 1 else times m (factorial (pred m)) in
-    //             factorial 5
-    //             ",
-    //             "120",
-    //             "Nat",
-    //         ),
-    //         // As
-    //         ("true as Bool", "true", "Bool"),
-    //         ("λ x:Bool. x as Bool", "λ x: Bool. x as Bool", "Bool -> Bool"),
-    //         // Ref
-    //         ("let r = ref 40 in (r := succ(!r); r := succ(!r); !r)", "42", "Nat"),
-    //         // TmAbbBind
-    //         ("x = 41; succ x", "42", "Nat"),
-    //         ("r = ref 40; r := succ(!r); r := succ(!r); !r", "42", "Nat"),
-    //         (
-    //             "
-    //             z = 0;
-    //             plus = fix (λ f: Nat -> Nat -> Nat. λ m: Nat. λ n: Nat. if iszero m then n else succ (f (pred m) n));
-    //             times = fix (λ f: Nat -> Nat -> Nat. λ m: Nat. λ n: Nat. if iszero m then z else plus n (f (pred m) n));
-    //             times 6 7
-    //             ",
-    //             "42",
-    //             "Nat"
-    //         ),
-    //         // Record
-    //         ("{x=true, y=1}", "{x = true, y = 1}", "{x: Bool, y: Nat}"),
-    //         ("{x=true, y=1}.x", "true", "Bool"),
-    //         ("{true, 1}", "{1 = true, 2 = 1}", "{1: Bool, 2: Nat}"),
-    //         ("{true, 1}.1", "true", "Bool"),
-    //         ("{1, {2, {3}}}.2.2.1", "3", "Nat"),
-    //         ("{x = (λ x: Nat. succ x) 0, y = succ 10}", "{x = 1, y = 11}", "{x: Nat, y: Nat}"),
-    //         ("(λ r: {x: Nat, y: Bool}. r.x) {x = 42, y = true}", "42", "Nat"),
-    //         // Variant
-    //         ("λ x: <a: Bool, b: Bool>. x", "λ x: <a: Bool, b: Bool>. x", "<a: Bool, b: Bool> -> <a: Bool, b: Bool>"),
-    //         ("<x = 10> as <x: Nat, b: Bool>", "<x = 10> as <x: Nat, b: Bool>", "<x: Nat, b: Bool>"),
-    //         (
-    //             "(λ o: <some: Nat, none: Unit>. case o of <some = n> => succ (n) | <none = u> => 0) <none = unit> as <some: Nat, none: Unit>",
-    //             "0",
-    //             "Nat",
-    //         ),
-    //         (
-    //             "
-    //             s = λ o: <some: Nat, none: Unit>.
-    //                   case o of <some = n> => succ (n)
-    //                           | <none = u> => 0;
-    //             o = <some = 10> as <some: Nat, none: Unit>;
-    //             s o;
-    //             ",
-    //             "11",
-    //             "Nat"
-    //         ),
-    //         // Other
-    //         (
-    //             "
-    //             counter = λ c: Nat. let v = ref c in {inc=λ u: Unit. (v := succ (!v); !v), dec=λ u: Unit. (v := pred (!v); !v)};
-    //             c = counter 10;
-    //             c.inc unit;
-    //             c.inc unit;
-    //             c.dec unit;
-    //             c.inc unit;
-    //             ",
-    //             "12",
-    //             "Nat",
-    //         ),
-    //     ];
+    fn binder(input: &str) -> IResult<&str, ParseResult<Binding>> {
+        alt((
+            map(preceded(colon, ty), |fty| -> ParseResult<_> {
+                box move |ctx| VarBind(fty(ctx))
+            }),
+            map(preceded(eq, term), |ft| -> ParseResult<_> {
+                box move |ctx| TmAbbBind(ft(ctx), None)
+            }),
+        ))(input)
+    }
 
-    //     for (input, expect_term, expect_ty) in testcases {
-    //         let result = parser::parse(input);
-    //         assert!(result.is_ok(), "{}", input);
-    //         let (_, commands) = result.unwrap();
+    fn ty_binder(input: &str) -> IResult<&str, ParseResult<Binding>> {
+        map(preceded(eq, ty), |fty| -> ParseResult<_> {
+            box move |ctx| TyAbbBind(fty(ctx))
+        })(input)
+    }
 
-    //         let mut ctx = Context::new();
-    //         let mut store = Store::new();
-    //         let mut result = None;
-    //         for c in commands {
-    //             match c {
-    //                 Command::Eval(t) => result = Some(t.eval(&ctx, &mut store)),
-    //                 Command::Bind(s, b) => {
-    //                     let b = b.check(&mut ctx).eval(&ctx, &mut store);
-    //                     ctx.add_binding(s, b);
-    //                     store.shift(1)
-    //                 }
-    //             }
-    //         }
+    fn command(input: &str) -> IResult<&str, ParseResult<Command>> {
+        alt((
+            map(pair(ucid, ty_binder), |(id, fb)| -> ParseResult<_> {
+                box move |ctx| {
+                    let result = Bind(id.clone(), fb(ctx));
+                    ctx.add_name(id.to_string());
+                    result
+                }
+            }),
+            map(pair(lcid, binder), |(id, fb)| -> ParseResult<_> {
+                box move |ctx| {
+                    let result = Bind(id.clone(), fb(ctx));
+                    ctx.add_name(id.to_string());
+                    result
+                }
+            }),
+            map(term, |ft| -> ParseResult<_> {
+                box move |ctx| Eval(ft(ctx))
+            }),
+        ))(input)
+    }
 
-    //         assert!(result.is_some(), "{}", input);
-    //         let t = result.unwrap();
-    //         assert_eq!(expect_term, format!("{}", t), "{}", input);
-    //         assert_eq!(expect_ty, format!("{}", t.ty(&mut ctx)), "{}", input);
-    //     }
+    pub fn parse(input: &str) -> IResult<&str, Vec<Command>> {
+        let mut ctx = Context::new();
+        let (input, fs) = separated_list(semi, command)(input)?;
+        let mut result = vec![];
+        for f in fs {
+            result.push(f(&mut ctx));
+        }
+        Ok((input, result))
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut ctx = Context::new();
-    let (_, ft) = parser::term("(λX. λx:X. x) [∀X. X -> X] (λX. λx:X. x)").unwrap();
-    let t = ft(&mut ctx);
+    let (_, cmds) = parser::parse(
+        "
+        CBool = ∀X. X -> X -> X;
+        tru = λX. λt:X. λf:X. t;
+        fls = λX. λt:X. λf:X. f;
 
-    println!("t = {:?}", t);
-    println!("t.eval(...) = {:?}", t.eval(&ctx));
+        not = λb:CBool. λX. λt:X. λf:X. b [X] f t;
+        not tru [CBool] tru fls;
+
+        and = λb:CBool. λc:CBool. λX. λt:X. λf:X. b [X] (c [X] t f) f;
+        and tru tru [CBool] tru fls;
+        and tru fls [CBool] tru fls;
+        ",
+    )
+    .unwrap();
+
+    // println!("cmds = {:?}", cmds);
+
+    // eval loop
+    let mut ctx = Context::new();
+    for cmd in cmds {
+        println!("> {:?}", cmd);
+
+        match cmd {
+            Eval(t) => {
+                let t = t.eval(&ctx);
+                println!("{:?}", t);
+            }
+            Bind(x, bind) => {
+                let bind = bind.eval(&ctx);
+                println!("{:?}", bind);
+                ctx.add_binding(x.to_string(), bind);
+            }
+            _ => panic!("Invalid Command: {:?}", cmd),
+        }
+    }
 
     Ok(())
 }
