@@ -1,4 +1,4 @@
-// #![feature(box_syntax, box_patterns)]
+#![feature(box_syntax, box_patterns)]
 
 use std::env;
 use std::fmt;
@@ -8,20 +8,20 @@ use std::rc::Rc;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ty {
     TyVar(usize),
-    TyArr(Rc<Ty>, Rc<Ty>),
-    TyAll(Rc<str>, Rc<Ty>),
-    TySome(Rc<str>, Rc<Ty>),
+    TyArr(Box<Ty>, Box<Ty>),
+    TyAll(Rc<str>, Box<Ty>),
+    TySome(Rc<str>, Box<Ty>),
 }
 
 #[derive(Debug, Clone)]
 pub enum Term {
     TmVar(usize),
-    TmAbs(Rc<str>, Ty, Rc<Term>),
-    TmApp(Rc<Term>, Rc<Term>),
-    TmTAbs(Rc<str>, Rc<Term>),
-    TmTApp(Rc<Term>, Ty),
-    TmPack(Ty, Rc<Term>, Ty),
-    TmUnpack(Rc<str>, Rc<str>, Rc<Term>, Rc<Term>),
+    TmAbs(Rc<str>, Ty, Box<Term>),
+    TmApp(Box<Term>, Box<Term>),
+    TmTAbs(Rc<str>, Box<Term>),
+    TmTApp(Box<Term>, Ty),
+    TmPack(Ty, Box<Term>, Ty),
+    TmUnpack(Rc<str>, Rc<str>, Box<Term>, Box<Term>),
 }
 
 #[derive(Clone, Debug)]
@@ -64,7 +64,7 @@ impl Context {
     }
 
     fn with_binding<R, F: FnOnce(&mut Self) -> R>(&mut self, x: String, bind: Binding, f: F) -> R {
-        self.bindings.push((x, bind));
+        self.add_binding(x, bind);
         let result = f(self);
         self.bindings.pop();
         result
@@ -109,7 +109,7 @@ impl Context {
     }
 
     fn is_name_bound(&self, x: &str) -> bool {
-        self.bindings.iter().rev().any(|(s, _)| s == x)
+        self.bindings.iter().any(|(s, _)| s == x)
     }
 }
 
@@ -122,23 +122,18 @@ impl Term {
     ) -> Self {
         match &self {
             TmVar(x) => onvar(c, *x),
-            TmAbs(x, ty1, t2) => TmAbs(x.clone(), ty1.clone(), t2.map(c + 1, onvar, ontype).into()),
-            TmApp(t1, t2) => TmApp(
-                t1.map(c, onvar, ontype).into(),
-                t2.map(c, onvar, ontype).into(),
-            ),
-            TmTAbs(tyx, t2) => TmTAbs(tyx.clone(), t2.map(c + 1, onvar, ontype).into()),
-            TmTApp(t1, ty2) => TmTApp(t1.map(c, onvar, ontype).into(), ontype(c, ty2)),
-            TmPack(ty1, t2, ty3) => TmPack(
-                ontype(c, ty1),
-                t2.map(c, onvar, ontype).into(),
-                ontype(c, ty3),
-            ),
+            TmAbs(x, ty1, t2) => TmAbs(x.clone(), ontype(c, ty1), box t2.map(c + 1, onvar, ontype)),
+            TmApp(t1, t2) => TmApp(box t1.map(c, onvar, ontype), box t2.map(c, onvar, ontype)),
+            TmTAbs(tyx, t2) => TmTAbs(tyx.clone(), box t2.map(c + 1, onvar, ontype)),
+            TmTApp(t1, ty2) => TmTApp(box t1.map(c, onvar, ontype), ontype(c, ty2)),
+            TmPack(ty1, t2, ty3) => {
+                TmPack(ontype(c, ty1), box t2.map(c, onvar, ontype), ontype(c, ty3))
+            }
             TmUnpack(tyx, x, t1, t2) => TmUnpack(
                 tyx.clone(),
                 x.clone(),
-                t1.map(c, onvar, ontype).into(),
-                t2.map(c + 2, onvar, ontype).into(),
+                box t1.map(c, onvar, ontype),
+                box t2.map(c + 2, onvar, ontype),
             ),
         }
     }
@@ -181,483 +176,58 @@ impl Term {
         self.ty_subst(0, &ty.shift(1)).shift(-1)
     }
 
-    //     fn is_numeric_val(&self, ctx: &Context) -> bool {
-    //         match self {
-    //             TmZero => true,
-    //             TmSucc(t1) => t1.is_numeric_val(ctx),
-    //             _ => false,
-    //         }
-    //     }
+    fn is_val(&self, ctx: &Context) -> bool {
+        match &self {
+            TmAbs(_, _, _) => true,
+            TmPack(_, v1, _) if v1.is_val(ctx) => true,
+            TmTAbs(_, _) => true,
+            _ => false,
+        }
+    }
 
-    //     fn is_val(&self, ctx: &Context) -> bool {
-    //         match self {
-    //             TmTrue | TmFalse | TmAbs(_, _, _) | TmUnit | TmString(_) | TmFloat(_) | TmLoc(_) => {
-    //                 true
-    //             }
-    //             TmTag(_, t1, _) if t1.is_val(ctx) => true,
-    //             TmRecord(fields) => fields.iter().all(|(_, ti)| ti.is_val(ctx)),
-    //             _ if self.is_numeric_val(ctx) => true,
-    //             _ => false,
-    //         }
-    //     }
+    fn eval1(&self, ctx: &Context) -> Option<Self> {
+        Some(match self {
+            // TmApp
+            TmApp(box TmAbs(_, _, t12), v2) if v2.is_val(ctx) => t12.subst_top(v2),
+            TmApp(v1, t2) if v1.is_val(ctx) => TmApp(v1.clone(), box t2.eval1(ctx)?),
+            TmApp(t1, t2) => TmApp(box t1.eval1(ctx)?, t2.clone()),
+            // TmUnpack, TmPack
+            TmUnpack(_, _, box TmPack(ty11, v12, _), t2) if v12.is_val(ctx) => {
+                v12.shift(1).subst_top(t2).ty_subst_top(ty11)
+            }
+            TmUnpack(tyx, x, t1, t2) => {
+                TmUnpack(tyx.clone(), x.clone(), box t1.eval1(ctx)?, t2.clone())
+            }
+            TmPack(ty1, t2, ty3) => TmPack(ty1.clone(), box t2.eval1(ctx)?, ty3.clone()),
+            // Var
+            TmVar(n) => match ctx.get_binding(*n) {
+                TmAbbBind(t, _) => t.clone(),
+                _ => return None,
+            },
+            // TmTApp
+            TmTApp(box TmTAbs(x, t11), ty2) => t11.ty_subst_top(ty2),
+            TmTApp(t1, ty2) => TmTApp(box t1.eval1(ctx)?, ty2.clone()),
+            // Other
+            _ => return None,
+        })
+    }
 
-    //     fn eval1(&self, ctx: &Context, store: &mut Store) -> Option<Self> {
-    //         match self {
-    //             TmApp(box TmAbs(_, _, t12), v2) if v2.is_val(ctx) => Some(t12.subst_top(v2)),
-    //             TmApp(v1, t2) if v1.is_val(ctx) => Some(TmApp(v1.clone(), box t2.eval1(ctx, store)?)),
-    //             TmApp(t1, t2) => Some(TmApp(box t1.eval1(ctx, store)?, t2.clone())),
-    //             TmIf(box TmTrue, t2, _) => Some((**t2).clone()),
-    //             TmIf(box TmFalse, _, t3) => Some((**t3).clone()),
-    //             TmIf(t1, t2, t3) => Some(TmIf(box t1.eval1(ctx, store)?, t2.clone(), t3.clone())),
-    //             // Nat
-    //             TmSucc(t1) => Some(TmSucc(box t1.eval1(ctx, store)?)),
-    //             TmPred(box TmZero) => Some(TmZero),
-    //             TmPred(box TmSucc(nv1)) if nv1.is_numeric_val(ctx) => Some((**nv1).clone()),
-    //             TmPred(t1) => Some(TmPred(box t1.eval1(ctx, store)?)),
-    //             TmIsZero(box TmZero) => Some(TmTrue),
-    //             TmIsZero(box TmSucc(nv1)) if nv1.is_numeric_val(ctx) => Some(TmFalse),
-    //             TmIsZero(t1) => Some(TmIsZero(box t1.eval1(ctx, store)?)),
-    //             // Extension
-    //             TmTimesFloat(box TmFloat(f1), box TmFloat(f2)) => Some(TmFloat(*f1 * *f2)),
-    //             TmTimesFloat(box TmFloat(f1), t2) => {
-    //                 Some(TmTimesFloat(box TmFloat(*f1), box t2.eval1(ctx, store)?))
-    //             }
-    //             TmTimesFloat(t1, t2) => Some(TmTimesFloat(box t1.eval1(ctx, store)?, (*t2).clone())),
-    //             TmAscribe(v1, _) if v1.is_val(ctx) => Some((**v1).clone()),
-    //             TmAscribe(t1, ty) => Some(TmAscribe(box t1.eval1(ctx, store)?, ty.clone())),
-    //             TmLet(_, v1, t2) if v1.is_val(ctx) => Some(t2.subst_top(v1)),
-    //             TmLet(x, t1, t2) => Some(TmLet(x.clone(), box t1.eval1(ctx, store)?, t2.clone())),
-    //             TmFix(box TmAbs(_, _, t12)) => Some(t12.subst_top(self)),
-    //             TmFix(t1) if !t1.is_val(ctx) => Some(TmFix(box t1.eval1(ctx, store)?)),
-    //             TmVar(n) => match ctx.get_binding(*n) {
-    //                 TmAbbBind(t, _) => Some(t.clone()),
-    //                 _ => None,
-    //             },
-    //             // Ref
-    //             TmRef(box t1) if t1.is_val(ctx) => {
-    //                 let l = store.extend(t1.clone());
-    //                 Some(TmLoc(l))
-    //             }
-    //             TmRef(t1) => Some(TmRef(box t1.eval1(ctx, store)?)),
-    //             TmDeref(box TmLoc(l)) => Some(store.lookup(*l).clone()),
-    //             TmDeref(box t1) if !t1.is_val(ctx) => Some(TmDeref(box t1.eval1(ctx, store)?)),
-    //             TmAssign(box TmLoc(l), box v2) if v2.is_val(ctx) => {
-    //                 store.update(*l, v2.clone());
-    //                 Some(TmUnit)
-    //             }
-    //             TmAssign(v1, t2) if v1.is_val(ctx) => {
-    //                 Some(TmAssign(v1.clone(), box t2.eval1(ctx, store)?))
-    //             }
-    //             TmAssign(t1, t2) => Some(TmAssign(box t1.eval1(ctx, store)?, t2.clone())),
-    //             // Record
-    //             TmRecord(fields) => {
-    //                 let mut nfields = vec![];
-    //                 let mut all_value = true;
-
-    //                 for (li, ti) in fields {
-    //                     if all_value && !ti.is_val(ctx) {
-    //                         all_value = false;
-    //                         nfields.push((li.clone(), ti.eval1(ctx, store)?));
-    //                     } else {
-    //                         nfields.push((li.clone(), ti.clone()));
-    //                     }
-    //                 }
-
-    //                 if all_value {
-    //                     None
-    //                 } else {
-    //                     Some(TmRecord(nfields))
-    //                 }
-    //             }
-    //             TmProj(box TmRecord(fields), l) if fields.iter().all(|(_, ti)| ti.is_val(ctx)) => {
-    //                 fields
-    //                     .iter()
-    //                     .find(|(li, _)| li == l)
-    //                     .map(|(_, ti)| ti.clone())
-    //             }
-    //             TmProj(t1, l) => Some(TmProj(box t1.eval1(ctx, store)?, l.clone())),
-    //             // Variant
-    //             TmTag(l, t1, ty) => Some(TmTag(l.clone(), box t1.eval1(ctx, store)?, ty.clone())),
-    //             TmCase(box TmTag(li, v11, _), branches) if v11.is_val(ctx) => {
-    //                 let (_, body) = branches.iter().find(|(l, _)| l == li).map(|(_, v)| v)?;
-    //                 Some(body.subst_top(v11))
-    //             }
-    //             TmCase(t1, branches) => Some(TmCase(box t1.eval1(ctx, store)?, branches.clone())),
-    //             // Other
-    //             _ => None,
-    //         }
-    //     }
-
-    //     fn eval(&self, ctx: &Context, store: &mut Store) -> Self {
-    //         let mut t = self.clone();
-    //         while let Some(n) = t.eval1(ctx, store) {
-    //             t = n;
-    //         }
-    //         t
-    //     }
-
-    //     // fn eval_by_big_step(&self, ctx: &Context) -> Self {
-    //     //     match self {
-    //     //         TmApp(t1, t2) => {
-    //     //             let t1 = t1.eval(ctx);
-    //     //             let t2 = t2.eval(ctx);
-    //     //             if let TmAbs(_, _, t12) = &t1 {
-    //     //                 if t2.is_val(ctx) {
-    //     //                     return t12.subst_top(&t2);
-    //     //                 }
-    //     //             }
-    //     //             TmApp(box t1, box t2)
-    //     //         }
-    //     //         TmIf(t1, t2, t3) => {
-    //     //             if let TmTrue = t1.eval(ctx) {
-    //     //                 t2.eval(ctx)
-    //     //             } else {
-    //     //                 t3.eval(ctx)
-    //     //             }
-    //     //         }
-    //     //         _ => (*self).clone(),
-    //     //     }
-    //     // }
-
-    //     fn ty(&self, ctx: &mut Context) -> Ty {
-    //         match self {
-    //             TmVar(i) => ctx.get_type(*i).clone(),
-    //             TmAbs(x, ty1, t2) => ctx.with_binding(x.clone(), VarBind(ty1.clone()), |mut ctx| {
-    //                 TyArr(box ty1.clone(), box t2.ty(&mut ctx))
-    //             }),
-    //             TmApp(t1, t2) => {
-    //                 let ty1 = t1.ty(ctx);
-    //                 let ty2 = t2.ty(ctx);
-    //                 match ty1 {
-    //                     TyArr(ty11, ty12) => {
-    //                         if ty2 == *ty11 {
-    //                             return *ty12;
-    //                         }
-    //                         panic!("parameter type mismatch: {}, {}", ty2, *ty11);
-    //                     }
-    //                     _ => panic!("arrow type expected: {}", ty1),
-    //                 }
-    //             }
-    //             TmTrue | TmFalse => TyBool,
-    //             TmIf(t1, t2, t3) => {
-    //                 if t1.ty(ctx) == TyBool {
-    //                     let ty2 = t2.ty(ctx);
-    //                     if ty2 == t3.ty(ctx) {
-    //                         return ty2;
-    //                     }
-    //                     panic!("arms of conditional have different types");
-    //                 }
-    //                 panic!("guard of conditional not a boolean");
-    //             }
-    //             // Unit
-    //             TmUnit => TyUnit,
-    //             // String
-    //             TmString(_) => TyString,
-    //             // Float
-    //             TmFloat(_) => TyFloat,
-    //             TmTimesFloat(t1, t2) => {
-    //                 if let TyFloat = t1.ty(ctx) {
-    //                     if let TyFloat = t2.ty(ctx) {
-    //                         return TyFloat;
-    //                     }
-    //                 }
-    //                 panic!("argument of timesfloat is not a number");
-    //             }
-    //             // Nat
-    //             TmZero => TyNat,
-    //             TmSucc(t1) => {
-    //                 if let TyNat = t1.ty(ctx) {
-    //                     return TyNat;
-    //                 }
-    //                 panic!("argument of succ is not a number");
-    //             }
-    //             TmPred(t1) => {
-    //                 if let TyNat = t1.ty(ctx) {
-    //                     return TyNat;
-    //                 }
-    //                 panic!("argument of succ is not a number");
-    //             }
-    //             TmIsZero(t1) => {
-    //                 if let TyNat = t1.ty(ctx) {
-    //                     return TyBool;
-    //                 }
-    //                 panic!("argument of succ is not a number");
-    //             }
-    //             // Extension
-    //             TmAscribe(t1, ty1) => {
-    //                 if t1.ty(ctx) == *ty1 {
-    //                     return ty1.clone();
-    //                 }
-    //                 panic!("body of as-term does not have the expected type");
-    //             }
-    //             TmLet(x, t1, t2) => {
-    //                 let ty1 = t1.ty(ctx);
-    //                 ctx.with_binding(x.clone(), VarBind(ty1), |ctx| t2.ty(ctx))
-    //             }
-    //             TmFix(t1) => {
-    //                 if let TyArr(box ty11, box ty12) = t1.ty(ctx) {
-    //                     if ty11 == ty12 {
-    //                         return ty12.clone();
-    //                     }
-    //                     panic!("result of body not compatible");
-    //                 }
-    //                 panic!("arrow type expected");
-    //             }
-    //             // Assign
-    //             TmRef(t1) => TyRef(box t1.ty(ctx)),
-    //             TmLoc(_) => panic!("locations are not supposed to occur in source programs!"),
-    //             TmDeref(t1) => {
-    //                 if let TyRef(box ty1) = t1.ty(ctx) {
-    //                     return ty1.clone();
-    //                 }
-    //                 panic!("argument of ! is not a Ref");
-    //             }
-    //             TmAssign(t1, t2) => {
-    //                 if let TyRef(box ty1) = t1.ty(ctx) {
-    //                     if ty1 == t2.ty(ctx) {
-    //                         return TyUnit;
-    //                     }
-    //                     panic!("arguments of := are incompatible");
-    //                 }
-    //                 panic!("arguments of ! is not a Ref");
-    //             }
-    //             // Record
-    //             TmRecord(fields) => TyRecord(
-    //                 fields
-    //                     .iter()
-    //                     .map(|(li, ti)| (li.clone(), ti.ty(ctx)))
-    //                     .collect(),
-    //             ),
-    //             TmProj(t1, l) => {
-    //                 if let TyRecord(fields) = t1.ty(ctx) {
-    //                     if let Some((_, tyi)) = fields.iter().find(|(li, _)| li == l) {
-    //                         return tyi.clone();
-    //                     }
-    //                     panic!("label {} not found", l);
-    //                 }
-    //                 panic!("Expected record type");
-    //             }
-    //             // Variant
-    //             TmTag(li, ti, ty) => {
-    //                 if let TyVariant(field_types) = ty {
-    //                     if let Some(expected_ty) =
-    //                         field_types.iter().find(|(l, _)| l == li).map(|(_, ty)| ty)
-    //                     {
-    //                         if &ti.ty(ctx) == expected_ty {
-    //                             return ty.clone();
-    //                         }
-    //                         panic!("field does not have expected type");
-    //                     }
-    //                     panic!("label not found");
-    //                 }
-    //                 panic!("Annotation is not a variant type");
-    //             }
-    //             TmCase(t, cases) => {
-    //                 if let TyVariant(field_types) = t.ty(ctx) {
-    //                     let case_types = cases
-    //                         .iter()
-    //                         .map(|(li, (xi, ti))| -> Ty {
-    //                             let ty = field_types
-    //                                 .iter()
-    //                                 .find(|(l, _)| l == li)
-    //                                 .map(|(_, ty)| ty)
-    //                                 .unwrap();
-    //                             ctx.with_binding(xi.clone(), VarBind(ty.clone()), |ctx| ti.ty(ctx))
-    //                         })
-    //                         .collect::<Vec<_>>();
-    //                     if !&case_types.windows(2).all(|tys| tys[0] == tys[1]) {
-    //                         panic!("same type expected");
-    //                     }
-    //                     return case_types[0].clone();
-    //                 }
-    //                 panic!("Expected variant type");
-    //             }
-    //         }
-    //     }
-
-    //     fn format(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    //         match self {
-    //             TmAbs(x, ty, t1) => ctx.with_fresh_name(x, |mut ctx, x| {
-    //                 write!(f, "λ {}: {}. ", x, ty)?;
-    //                 t1.format(&mut ctx, f)
-    //             }),
-    //             TmIf(t1, t2, t3) => {
-    //                 write!(f, "if ")?;
-    //                 t1.format(ctx, f)?;
-    //                 write!(f, " then ")?;
-    //                 t2.format(ctx, f)?;
-    //                 write!(f, " else ")?;
-    //                 t3.format(ctx, f)
-    //             }
-    //             TmLet(x, t1, t2) => {
-    //                 write!(f, "let {} = ", x)?;
-    //                 t1.format(ctx, f)?;
-    //                 write!(f, " in ")?;
-    //                 ctx.with_name(x.clone(), |ctx| t2.format(ctx, f))
-    //             }
-    //             TmFix(t1) => {
-    //                 write!(f, "fix ")?;
-    //                 t1.format(ctx, f)
-    //             }
-    //             TmCase(t, cases) => {
-    //                 write!(f, "case ")?;
-    //                 t.format(ctx, f)?;
-    //                 write!(f, " of")?;
-
-    //                 let (l0, (x0, t0)) = &cases[0];
-    //                 write!(f, "<{} = {}> => ", l0, x0)?;
-    //                 t0.format(ctx, f)?;
-
-    //                 for (li, (xi, ti)) in &cases[1..] {
-    //                     write!(f, " | ")?;
-    //                     write!(f, "<{} = {}> => ", li, xi)?;
-    //                     ti.format(ctx, f)?;
-    //                 }
-
-    //                 write!(f, "")
-    //             }
-    //             TmAssign(t1, t2) => {
-    //                 t1.format_app_term(ctx, f)?;
-    //                 write!(f, " := ")?;
-    //                 t2.format_app_term(ctx, f)
-    //             }
-    //             _ => self.format_app_term(ctx, f),
-    //         }
-    //     }
-
-    //     fn format_app_term(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    //         match self {
-    //             TmApp(t1, t2) => {
-    //                 t1.format_app_term(ctx, f)?;
-    //                 write!(f, " ")?;
-    //                 t2.format_atomic_term(ctx, f)
-    //             }
-    //             // Nat
-    //             TmPred(t1) => {
-    //                 write!(f, "pred ")?;
-    //                 t1.format_atomic_term(ctx, f)
-    //             }
-    //             TmIsZero(t1) => {
-    //                 write!(f, "iszero ")?;
-    //                 t1.format_atomic_term(ctx, f)
-    //             }
-    //             // Float
-    //             TmTimesFloat(t1, t2) => {
-    //                 write!(f, "timesfloat ")?;
-    //                 t1.format_atomic_term(ctx, f)?;
-    //                 write!(f, " ")?;
-    //                 t2.format_atomic_term(ctx, f)
-    //             }
-    //             // Ref
-    //             TmRef(t1) => {
-    //                 write!(f, "ref ")?;
-    //                 t1.format_atomic_term(ctx, f)
-    //             }
-    //             TmDeref(t1) => {
-    //                 write!(f, "!")?;
-    //                 t1.format_atomic_term(ctx, f)
-    //             }
-    //             // Variant
-    //             TmTag(l, t, ty) => {
-    //                 write!(f, "<{} = ", l)?;
-    //                 t.format(ctx, f)?;
-    //                 write!(f, "> as ")?;
-    //                 ty.format(ctx, f)
-    //             }
-    //             _ => self.format_path_term(ctx, f),
-    //         }
-    //     }
-
-    //     fn format_path_term(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    //         match self {
-    //             TmProj(t1, l) => {
-    //                 t1.format_atomic_term(ctx, f)?;
-    //                 write!(f, ".{}", l)
-    //             }
-    //             _ => self.format_ascribe_term(ctx, f),
-    //         }
-    //     }
-
-    //     fn format_ascribe_term(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    //         match self {
-    //             TmAscribe(t1, ty1) => {
-    //                 t1.format_app_term(ctx, f)?;
-    //                 write!(f, " as ")?;
-    //                 ty1.format(ctx, f)
-    //             }
-    //             _ => self.format_atomic_term(ctx, f),
-    //         }
-    //     }
-
-    //     fn format_atomic_term(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    //         match self {
-    //             TmVar(x) => write!(
-    //                 f,
-    //                 "{}",
-    //                 ctx.index2name(*x).unwrap_or(&format!("<context #{}>", x))
-    //             ),
-    //             TmTrue => write!(f, "true"),
-    //             TmFalse => write!(f, "false"),
-    //             TmUnit => write!(f, "unit"),
-    //             TmString(s) => write!(f, "\"{}\"", s),
-    //             TmFloat(d) => write!(f, "{}", d),
-    //             TmZero => write!(f, "0"),
-    //             TmSucc(t1) => {
-    //                 let mut t = t1;
-    //                 let mut n = 1;
-    //                 loop {
-    //                     match t {
-    //                         box TmZero => return write!(f, "{}", n),
-    //                         box TmSucc(s) => {
-    //                             t = s;
-    //                             n += 1;
-    //                         }
-    //                         _ => {
-    //                             return {
-    //                                 write!(f, "(succ ")?;
-    //                                 t1.format_atomic_term(ctx, f)?;
-    //                                 write!(f, ")")
-    //                             }
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //             TmLoc(l) => write!(f, "<loc #{}>", l),
-    //             TmRecord(fields) => {
-    //                 write!(f, "{{")?;
-    //                 if fields.len() >= 1 {
-    //                     write!(f, "{} = ", fields[0].0)?;
-    //                     fields[0].1.format(ctx, f)?;
-    //                     for (li, ti) in &fields[1..] {
-    //                         write!(f, ", {} = ", li)?;
-    //                         ti.format(ctx, f)?;
-    //                     }
-    //                 }
-    //                 write!(f, "}}")
-    //             }
-    //             _ => {
-    //                 write!(f, "(")?;
-    //                 self.format(ctx, f)?;
-    //                 write!(f, ")")
-    //             }
-    //         }
-    //     }
-
-    //     fn display(&self, ctx: &Context) -> TermDisplay {
-    //         TermDisplay {
-    //             t: self.clone(),
-    //             ctx: ctx.clone(),
-    //         }
-    //     }
+    fn eval(&self, ctx: &Context) -> Self {
+        let mut t = self.clone();
+        while let Some(n) = t.eval1(ctx) {
+            t = n;
+        }
+        t
+    }
 }
 
 impl Ty {
     fn map<F: Copy + Fn(i32, usize) -> Self>(&self, c: i32, onvar: F) -> Self {
         match &self {
-            TyArr(ty1, ty2) => TyArr(ty1.map(c, onvar).into(), ty2.map(c, onvar).into()),
             TyVar(x) => onvar(c, *x),
-            TyAll(tyx, ty2) => TyAll(tyx.clone(), ty2.map(c + 1, onvar).into()),
-            TySome(tyx, ty2) => TySome(tyx.clone(), ty2.map(c + 1, onvar).into()),
+            TyArr(ty1, ty2) => TyArr(box ty1.map(c, onvar), box ty2.map(c, onvar)),
+            TyAll(tyx, ty2) => TyAll(tyx.clone(), box ty2.map(c + 1, onvar)),
+            TySome(tyx, ty2) => TySome(tyx.clone(), box ty2.map(c + 1, onvar)),
         }
     }
 
@@ -682,86 +252,9 @@ impl Ty {
     fn subst_top(&self, s: &Self) -> Self {
         self.subst(0, &s.shift(1)).shift(-1)
     }
-
-    // fn format(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    //     match self {
-    //         _ => self.format_arr_ty(ctx, f),
-    //     }
-    // }
-
-    // fn format_arr_ty(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    //     match self {
-    //         TyArr(t1, t2) => {
-    //             t1.format_atomic_ty(ctx, f)?;
-    //             write!(f, " -> ")?;
-    //             t2.format_arr_ty(ctx, f)
-    //         }
-    //         _ => self.format_atomic_ty(ctx, f),
-    //     }
-    // }
-
-    // fn format_atomic_ty(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    //     match self {
-    //         TyBool => write!(f, "Bool"),
-    //         TyUnit => write!(f, "Unit"),
-    //         TyString => write!(f, "String"),
-    //         TyFloat => write!(f, "Float"),
-    //         TyNat => write!(f, "Nat"),
-    //         TyRef(ty) => {
-    //             write!(f, "Ref ")?;
-    //             ty.format_atomic_ty(ctx, f)
-    //         }
-    //         TyRecord(fields) => {
-    //             write!(f, "{{")?;
-    //             if fields.len() >= 1 {
-    //                 write!(f, "{}: ", fields[0].0)?;
-    //                 fields[0].1.format(ctx, f)?;
-    //                 for (li, ti) in &fields[1..] {
-    //                     write!(f, ", {}: ", li)?;
-    //                     ti.format(ctx, f)?;
-    //                 }
-    //             }
-    //             write!(f, "}}")
-    //         }
-    //         TyVariant(fields) => {
-    //             write!(f, "<")?;
-    //             if fields.len() >= 1 {
-    //                 write!(f, "{}: ", fields[0].0)?;
-    //                 fields[0].1.format(ctx, f)?;
-    //                 for (li, ti) in &fields[1..] {
-    //                     write!(f, ", {}: ", li)?;
-    //                     ti.format(ctx, f)?;
-    //                 }
-    //             }
-    //             write!(f, ">")
-    //         }
-    //         TyArr(_, _) => {
-    //             write!(f, "(")?;
-    //             self.format(ctx, f)?;
-    //             write!(f, ")")
-    //         }
-    //     }
-    // }
 }
 
 impl Binding {
-    // fn check(&self, ctx: &mut Context) -> Self {
-    //     match self {
-    //         NameBind => NameBind,
-    //         VarBind(ty) => VarBind(ty.clone()),
-    //         TmAbbBind(t, None) => TmAbbBind(t.clone(), Some(t.ty(ctx))),
-    //         TmAbbBind(t, Some(ty)) if t.ty(ctx) == *ty => TmAbbBind(t.clone(), Some(ty.clone())),
-    //         TmAbbBind(_, _) => panic!("Type of binding does not match declared type"),
-    //     }
-    // }
-
-    // fn eval(&self, ctx: &Context, store: &mut Store) -> Self {
-    //     match self {
-    //         TmAbbBind(t, ty) => TmAbbBind(t.eval(ctx, store), ty.clone()),
-    //         _ => (*self).clone(),
-    //     }
-    // }
-
     fn shift(&self, d: i32) -> Self {
         match self {
             NameBind => NameBind,
@@ -772,65 +265,7 @@ impl Binding {
             TmAbbBind(t, Some(ty)) => TmAbbBind(t.shift(d), Some(ty.shift(d))),
         }
     }
-
-    // fn display(&self, ctx: &Context) -> BindingDisplay {
-    //     BindingDisplay {
-    //         b: self.clone(),
-    //         ctx: ctx.clone(),
-    //     }
-    // }
-
-    // fn format(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    //     match self {
-    //         NameBind => Ok(()),
-    //         VarBind(ty) => write!(f, ": {}", ty),
-    //         TmAbbBind(t, _) => {
-    //             write!(f, "= ")?;
-    //             t.format(ctx, f)
-    //         }
-    //     }
-    // }
 }
-
-// impl fmt::Display for Term {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         self.format(&mut Context::new(), f)
-//     }
-// }
-
-// impl fmt::Display for Ty {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         self.format(&mut Context::new(), f)
-//     }
-// }
-
-// impl fmt::Display for Binding {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         self.format(&mut Context::new(), f)
-//     }
-// }
-
-// struct TermDisplay {
-//     t: Term,
-//     ctx: Context,
-// }
-
-// struct BindingDisplay {
-//     b: Binding,
-//     ctx: Context,
-// }
-
-// impl fmt::Display for TermDisplay {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         self.t.format(&mut self.ctx.clone(), f)
-//     }
-// }
-
-// impl fmt::Display for BindingDisplay {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         self.b.format(&mut self.ctx.clone(), f)
-//     }
-// }
 
 // mod parser {
 //     use super::*;
@@ -1444,27 +879,11 @@ impl Binding {
 // }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // let args: Vec<String> = env::args().collect();
-    // let filename = &args[1];
-    // let code = fs::read_to_string(filename)?;
-    // let (_, commands) = parser::parse(&code).unwrap();
+    let ctx = Context::new();
+    let t = TmTAbs("X".into(), box TmAbs("x".into(), TyVar(0), box TmVar(0)));
 
-    // let mut ctx = Context::new();
-    // let mut store = Store::new();
-    // for c in commands {
-    //     match c {
-    //         Command::Eval(t) => {
-    //             println!("> {}", t.display(&ctx));
-    //             println!("{} : {}", t.eval(&ctx, &mut store), t.ty(&mut ctx));
-    //         }
-    //         Command::Bind(s, b) => {
-    //             let b = b.check(&mut ctx).eval(&ctx, &mut store);
-    //             println!("> {} {}", s, b.display(&ctx));
-    //             ctx.add_binding(s, b);
-    //             store.shift(1);
-    //         }
-    //     }
-    // }
+    println!("t = {:?}", t);
+    println!("t.eval(...) = {:?}", t.eval(&ctx));
 
     Ok(())
 }
