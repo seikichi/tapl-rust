@@ -267,620 +267,375 @@ impl Binding {
     }
 }
 
-// mod parser {
-//     use super::*;
+mod parser {
+    use super::*;
 
-//     use nom::{
-//         branch::alt,
-//         bytes::complete::tag,
-//         character::complete::{
-//             alpha1, alphanumeric0, char, digit1, multispace0 as ms0, multispace1 as ms1, none_of,
-//         },
-//         combinator::{map, not, peek, verify},
-//         multi::{many0, separated_list, separated_nonempty_list},
-//         number::complete::double,
-//         sequence::{delimited, pair, preceded, tuple},
-//         IResult,
-//     };
+    use nom::{
+        branch::alt,
+        bytes::complete::tag,
+        character::complete::{
+            alpha1, alphanumeric0, char, digit1, multispace0 as ms0, multispace1 as ms1, none_of,
+            one_of,
+        },
+        combinator::{map, not, peek, recognize, verify},
+        multi::{many0, many1, separated_list, separated_nonempty_list},
+        number::complete::double,
+        sequence::{delimited, pair, preceded, terminated, tuple},
+        IResult,
+    };
 
-//     type ParseResult<T> = Box<dyn Fn(&mut Context) -> T>;
+    type ParseResult<T> = Box<dyn Fn(&mut Context) -> T>;
 
-//     pub fn parse(input: &str) -> IResult<&str, Vec<Command>> {
-//         map(separated_list(pair(ms0, char(';')), command), |fs| {
-//             let mut ctx = Context::new();
-//             fs.iter().map(|f| f(&mut ctx)).collect()
-//         })(input)
-//     }
+    // tokens
+    const id_chars: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
 
-//     fn command(input: &str) -> IResult<&str, ParseResult<Command>> {
-//         alt((
-//             map(
-//                 pair(preceded(ms0, identifier), binder),
-//                 |(id, f)| -> ParseResult<_> {
-//                     box move |ctx| {
-//                         let result = Bind(id.clone(), f(ctx));
-//                         ctx.add_name(id.clone());
-//                         result
-//                     }
-//                 },
-//             ),
-//             map(term, |f| -> ParseResult<_> { box move |ctx| Eval(f(ctx)) }),
-//         ))(input)
-//     }
+    fn id(input: &str) -> IResult<&str, Rc<str>> {
+        map(
+            preceded(ms0, recognize(many1(one_of(id_chars)))),
+            |s: &str| s.into(),
+        )(input)
+    }
 
-//     fn binder(input: &str) -> IResult<&str, ParseResult<Binding>> {
-//         alt((
-//             map(
-//                 preceded(tuple((ms0, char(':'), ms0)), all_type),
-//                 |f| -> ParseResult<_> { box move |ctx| VarBind(f(ctx)) },
-//             ),
-//             map(
-//                 preceded(tuple((ms0, char('='), ms0)), term),
-//                 |f| -> ParseResult<_> { box move |ctx| TmAbbBind(f(ctx), None) },
-//             ),
-//         ))(input)
-//     }
+    fn ucid(input: &str) -> IResult<&str, Rc<str>> {
+        verify(id, |id: &str| id.chars().next().unwrap().is_uppercase())(input)
+    }
 
-//     fn all_type(input: &str) -> IResult<&str, ParseResult<Ty>> {
-//         preceded(ms0, arrow_type)(input)
-//     }
+    fn lcid(input: &str) -> IResult<&str, Rc<str>> {
+        verify(id, |id: &str| id.chars().next().unwrap().is_lowercase())(input)
+    }
 
-//     fn atomic_type(input: &str) -> IResult<&str, ParseResult<Ty>> {
-//         alt((
-//             map(preceded(ms0, tag("Bool")), |_| -> ParseResult<_> {
-//                 box |_ctx| TyBool
-//             }),
-//             map(preceded(ms0, tag("Unit")), |_| -> ParseResult<_> {
-//                 box |_ctx| TyUnit
-//             }),
-//             map(preceded(ms0, tag("String")), |_| -> ParseResult<_> {
-//                 box |_ctx| TyString
-//             }),
-//             map(preceded(ms0, tag("Float")), |_| -> ParseResult<_> {
-//                 box |_ctx| TyFloat
-//             }),
-//             map(preceded(ms0, tag("Nat")), |_| -> ParseResult<_> {
-//                 box |_ctx| TyNat
-//             }),
-//             map(
-//                 preceded(
-//                     ms0,
-//                     delimited(char('{'), field_types, preceded(ms0, char('}'))),
-//                 ),
-//                 |f| -> ParseResult<_> { box move |ctx| TyRecord(f(ctx)) },
-//             ),
-//             map(
-//                 preceded(
-//                     ms0,
-//                     delimited(char('<'), field_types, preceded(ms0, char('>'))),
-//                 ),
-//                 |f| -> ParseResult<_> { box move |ctx| TyVariant(f(ctx)) },
-//             ),
-//             preceded(
-//                 ms0,
-//                 delimited(char('('), all_type, preceded(ms0, char(')'))),
-//             ),
-//         ))(input)
-//     }
+    fn lambda(input: &str) -> IResult<&str, char> {
+        preceded(
+            ms0,
+            alt((map(pair(tag("lambda"), ms1), |_| 'λ'), char('λ'))),
+        )(input)
+    }
 
-//     fn field_types(input: &str) -> IResult<&str, ParseResult<Vec<(String, Ty)>>> {
-//         map(
-//             separated_list(pair(ms0, char(',')), field_type),
-//             |fs| -> ParseResult<_> {
-//                 box move |ctx| fs.iter().enumerate().map(|(i, f)| f(ctx, i + 1)).collect()
-//             },
-//         )(input)
-//     }
+    fn colon(input: &str) -> IResult<&str, char> {
+        preceded(ms0, char(':'))(input)
+    }
 
-//     type FieldTypeResult = Box<dyn Fn(&mut Context, usize) -> (String, Ty)>;
+    fn dot(input: &str) -> IResult<&str, char> {
+        preceded(ms0, char('.'))(input)
+    }
 
-//     fn field_type(input: &str) -> IResult<&str, FieldTypeResult> {
-//         alt((
-//             map(
-//                 tuple((label, ms0, char(':'), all_type)),
-//                 |(l, _, _, f)| -> FieldTypeResult { box move |ctx, _| (l.clone(), f(ctx)) },
-//             ),
-//             map(all_type, |f| -> FieldTypeResult {
-//                 box move |ctx, i| (format!("{}", i), f(ctx))
-//             }),
-//         ))(input)
-//     }
-//     fn arrow_type(input: &str) -> IResult<&str, ParseResult<Ty>> {
-//         map(
-//             separated_nonempty_list(pair(ms0, tag("->")), atomic_type),
-//             |fs| {
-//                 let mut it = fs.into_iter().rev();
-//                 let f = it.next().unwrap();
-//                 it.fold(f, |f1, f2| box move |ctx| TyArr(box f2(ctx), box f1(ctx)))
-//             },
-//         )(input)
-//     }
+    fn all(input: &str) -> IResult<&str, char> {
+        preceded(ms0, char('∀'))(input)
+    }
 
-//     pub fn term(input: &str) -> IResult<&str, ParseResult<Term>> {
-//         alt((
-//             if_term,
-//             lambda,
-//             let_term,
-//             letrec_term,
-//             assign,
-//             case,
-//             app_term,
-//         ))(input)
-//     }
+    fn some(input: &str) -> IResult<&str, char> {
+        preceded(ms0, char('∃'))(input)
+    }
 
-//     fn case(input: &str) -> IResult<&str, ParseResult<Term>> {
-//         map(
-//             tuple((
-//                 preceded(ms0, tag("case")),
-//                 term,
-//                 preceded(ms0, tag("of")),
-//                 cases,
-//             )),
-//             |(_, tf, _, cf)| -> ParseResult<_> { box move |ctx| TmCase(box tf(ctx), cf(ctx)) },
-//         )(input)
-//     }
+    fn comma(input: &str) -> IResult<&str, char> {
+        preceded(ms0, char(','))(input)
+    }
 
-//     fn cases(input: &str) -> IResult<&str, ParseResult<Vec<(String, (String, Term))>>> {
-//         map(
-//             separated_nonempty_list(pair(ms0, char('|')), single_case),
-//             |fs| -> ParseResult<_> { box move |ctx| fs.iter().map(|f| f(ctx)).collect() },
-//         )(input)
-//     }
+    fn lcurly(input: &str) -> IResult<&str, char> {
+        preceded(ms0, char('{'))(input)
+    }
 
-//     fn single_case(input: &str) -> IResult<&str, ParseResult<(String, (String, Term))>> {
-//         map(
-//             tuple((
-//                 preceded(ms0, char('<')),
-//                 label,
-//                 preceded(ms0, char('=')),
-//                 label,
-//                 preceded(ms0, char('>')),
-//                 preceded(ms0, tag("=>")),
-//                 app_term,
-//             )),
-//             |(_, l1, _, l2, _, _, ft)| -> ParseResult<_> {
-//                 box move |ctx| {
-//                     (
-//                         l1.clone(),
-//                         (l2.clone(), ctx.with_name(l2.clone(), |ctx| ft(ctx))),
-//                     )
-//                 }
-//             },
-//         )(input)
-//     }
+    fn rcurly(input: &str) -> IResult<&str, char> {
+        preceded(ms0, char('}'))(input)
+    }
 
-//     fn lambda(input: &str) -> IResult<&str, ParseResult<Term>> {
-//         map(
-//             tuple((
-//                 preceded(ms0, alt((tag("lambda"), tag("λ")))),
-//                 preceded(ms1, identifier),
-//                 preceded(ms0, char(':')),
-//                 all_type,
-//                 preceded(ms0, char('.')),
-//                 term,
-//             )),
-//             |(_, s, _, tyf, _, tf)| -> ParseResult<_> {
-//                 box move |ctx| {
-//                     ctx.with_name(s.clone(), |mut ctx| {
-//                         TmAbs(s.clone(), tyf(&mut ctx), box tf(&mut ctx))
-//                     })
-//                 }
-//             },
-//         )(input)
-//     }
+    fn lparen(input: &str) -> IResult<&str, char> {
+        preceded(ms0, char('('))(input)
+    }
 
-//     fn assign(input: &str) -> IResult<&str, ParseResult<Term>> {
-//         map(
-//             tuple((app_term, preceded(ms0, tag(":=")), app_term)),
-//             |(f1, _, f2)| -> ParseResult<_> { box move |ctx| TmAssign(box f1(ctx), box f2(ctx)) },
-//         )(input)
-//     }
+    fn rparen(input: &str) -> IResult<&str, char> {
+        preceded(ms0, char(')'))(input)
+    }
 
-//     fn let_term(input: &str) -> IResult<&str, ParseResult<Term>> {
-//         map(
-//             tuple((
-//                 preceded(ms0, tag("let")),
-//                 preceded(ms1, identifier),
-//                 preceded(ms0, char('=')),
-//                 term,
-//                 preceded(ms1, tag("in")),
-//                 preceded(ms1, term),
-//             )),
-//             |(_, s, _, f1, _, f2)| -> ParseResult<_> {
-//                 box move |ctx| {
-//                     let t1 = f1(ctx);
-//                     ctx.with_name(s.clone(), |ctx| TmLet(s.clone(), box t1, box f2(ctx)))
-//                 }
-//             },
-//         )(input)
-//     }
+    fn lsquare(input: &str) -> IResult<&str, char> {
+        preceded(ms0, char('['))(input)
+    }
 
-//     fn letrec_term(input: &str) -> IResult<&str, ParseResult<Term>> {
-//         map(
-//             tuple((
-//                 preceded(ms0, tag("letrec")),
-//                 preceded(ms1, identifier),
-//                 preceded(ms0, char(':')),
-//                 preceded(ms0, all_type),
-//                 preceded(ms0, char('=')),
-//                 term,
-//                 preceded(ms1, tag("in")),
-//                 preceded(ms1, term),
-//             )),
-//             |(_, s, _, fty, _, f1, _, f2)| -> ParseResult<_> {
-//                 box move |ctx| {
-//                     let ty = fty(ctx);
-//                     ctx.with_name(s.clone(), |ctx| {
-//                         TmLet(
-//                             s.clone(),
-//                             box TmFix(box TmAbs(s.clone(), ty, box f1(ctx))),
-//                             box f2(ctx),
-//                         )
-//                     })
-//                 }
-//             },
-//         )(input)
-//     }
+    fn rsquare(input: &str) -> IResult<&str, char> {
+        preceded(ms0, char(']'))(input)
+    }
 
-//     fn if_term(input: &str) -> IResult<&str, ParseResult<Term>> {
-//         map(
-//             tuple((
-//                 preceded(ms0, tag("if")),
-//                 term,
-//                 preceded(ms1, tag("then")),
-//                 term,
-//                 preceded(ms1, tag("else")),
-//                 term,
-//             )),
-//             |(_, f1, _, f2, _, f3)| -> ParseResult<_> {
-//                 box move |ctx| TmIf(box f1(ctx), box f2(ctx), box f3(ctx))
-//             },
-//         )(input)
-//     }
+    // parsers
+    pub fn term(input: &str) -> IResult<&str, ParseResult<Term>> {
+        alt((app_term, lambda_term))(input) // FIXME
+    }
 
-//     fn app_term(input: &str) -> IResult<&str, ParseResult<Term>> {
-//         map(separated_nonempty_list(ms1, app_term_1), |fs| {
-//             let mut it = fs.into_iter();
-//             let f = it.next().unwrap();
-//             it.fold(f, |f1, f2| box move |ctx| TmApp(box f1(ctx), box f2(ctx)))
-//         })(input)
-//     }
+    fn lambda_term(input: &str) -> IResult<&str, ParseResult<Term>> {
+        alt((
+            map(
+                tuple((lambda, lcid, colon, ty, dot, term)),
+                |(_, id, _, fty, _, ft)| -> ParseResult<Term> {
+                    box move |ctx| {
+                        ctx.with_name(id.to_string(), |ctx| {
+                            TmAbs(id.clone(), fty(ctx), box ft(ctx))
+                        })
+                    }
+                },
+            ),
+            map(
+                tuple((lambda, char('_'), colon, ty, dot, term)),
+                |(_, _, _, fty, _, ft)| -> ParseResult<Term> {
+                    box move |ctx| {
+                        ctx.with_name("_".into(), |ctx| TmAbs("_".into(), fty(ctx), box ft(ctx)))
+                    }
+                },
+            ),
+            map(
+                tuple((lambda, ucid, dot, term)),
+                |(_, id, _, ft)| -> ParseResult<Term> {
+                    box move |ctx| {
+                        ctx.with_name(id.to_string(), |ctx| TmTAbs(id.clone(), box ft(ctx)))
+                    }
+                },
+            ),
+        ))(input)
+    }
 
-//     fn app_term_1(input: &str) -> IResult<&str, ParseResult<Term>> {
-//         alt((
-//             map(
-//                 preceded(pair(ms0, tag("fix")), path_term),
-//                 |f| -> ParseResult<_> { box move |ctx| TmFix(box f(ctx)) },
-//             ),
-//             map(
-//                 preceded(pair(ms0, tag("succ")), path_term),
-//                 |f| -> ParseResult<_> { box move |ctx| TmSucc(box f(ctx)) },
-//             ),
-//             map(
-//                 preceded(pair(ms0, tag("pred")), path_term),
-//                 |f| -> ParseResult<_> { box move |ctx| TmPred(box f(ctx)) },
-//             ),
-//             map(
-//                 preceded(pair(ms0, tag("iszero")), path_term),
-//                 |f| -> ParseResult<_> { box move |ctx| TmIsZero(box f(ctx)) },
-//             ),
-//             map(
-//                 tuple((pair(ms0, tag("timesfloat")), path_term, path_term)),
-//                 |(_, f1, f2)| -> ParseResult<_> {
-//                     box move |ctx| TmTimesFloat(box f1(ctx), box f2(ctx))
-//                 },
-//             ),
-//             map(
-//                 preceded(pair(ms0, tag("ref")), path_term),
-//                 |f| -> ParseResult<_> { box move |ctx| TmRef(box f(ctx)) },
-//             ),
-//             map(
-//                 preceded(pair(ms0, tag("!")), path_term),
-//                 |f| -> ParseResult<_> { box move |ctx| TmDeref(box f(ctx)) },
-//             ),
-//             path_term,
-//         ))(input)
-//     }
+    fn app_term(input: &str) -> IResult<&str, ParseResult<Term>> {
+        map(
+            pair(app_term_head, separated_list(ms1, app_term_rest)),
+            |(head, tail)| -> ParseResult<Term> {
+                box move |ctx| tail.iter().fold(head(ctx), |t, f| f(ctx, t))
+            },
+        )(input)
+    }
 
-//     fn path_term(input: &str) -> IResult<&str, ParseResult<Term>> {
-//         map(
-//             pair(ascribe_term, many0(preceded(pair(ms0, char('.')), label))),
-//             |(tf, ls)| -> ParseResult<_> {
-//                 box move |ctx| ls.iter().fold(tf(ctx), |t, li| TmProj(box t, li.clone()))
-//             },
-//         )(input)
-//     }
+    fn app_term_head(input: &str) -> IResult<&str, ParseResult<Term>> {
+        atomic_term(input)
+    }
 
-//     fn label(input: &str) -> IResult<&str, String> {
-//         preceded(
-//             ms0,
-//             alt((identifier, map(digit1, |s: &str| s.parse().unwrap()))),
-//         )(input)
-//     }
+    fn app_term_rest(input: &str) -> IResult<&str, Box<dyn Fn(&mut Context, Term) -> Term>> {
+        alt((
+            map(
+                atomic_term,
+                |f| -> Box<dyn Fn(&mut Context, Term) -> Term> {
+                    box move |ctx, t| TmApp(box t, box f(ctx))
+                },
+            ),
+            map(
+                delimited(lsquare, ty, rsquare),
+                |fty| -> Box<dyn Fn(&mut Context, Term) -> Term> {
+                    box move |ctx, t| TmTApp(box t, fty(ctx))
+                },
+            ),
+        ))(input)
+    }
 
-//     fn ascribe_term(input: &str) -> IResult<&str, ParseResult<Term>> {
-//         alt((
-//             map(
-//                 tuple((atomic_term, ms1, tag("as"), ms1, all_type)),
-//                 |(ft, _, _, _, fty)| -> ParseResult<_> {
-//                     box move |ctx| TmAscribe(box ft(ctx), fty(ctx))
-//                 },
-//             ),
-//             atomic_term,
-//         ))(input)
-//     }
+    fn atomic_term(input: &str) -> IResult<&str, ParseResult<Term>> {
+        preceded(
+            ms0,
+            alt((
+                delimited(lparen, term, rparen),
+                map(lcid, |id| -> ParseResult<_> {
+                    box move |ctx| TmVar(ctx.name2index(&id).expect(&format!("{} not found", id)))
+                }),
+            )),
+        )(input)
+    }
 
-//     fn term_seq(input: &str) -> IResult<&str, ParseResult<Term>> {
-//         map(separated_nonempty_list(pair(ms0, char(';')), term), |fs| {
-//             let mut it = fs.into_iter().rev();
-//             let f = it.next().unwrap();
-//             it.fold(f, |f1, f2| {
-//                 box move |ctx| {
-//                     TmApp(
-//                         box TmAbs(
-//                             "_".into(),
-//                             TyUnit,
-//                             ctx.with_name("_".into(), |ctx| box f1(ctx)),
-//                         ),
-//                         box f2(ctx),
-//                     )
-//                 }
-//             })
-//         })(input)
-//     }
+    fn ty(input: &str) -> IResult<&str, ParseResult<Ty>> {
+        alt((
+            arrow_type,
+            map(
+                tuple((all, ucid, dot, ty)),
+                |(_, id, _, fty)| -> ParseResult<Ty> {
+                    box move |ctx| {
+                        ctx.with_name(id.to_string(), |ctx| TyAll(id.clone(), box fty(ctx)))
+                    }
+                },
+            ),
+        ))(input)
+    }
 
-//     fn atomic_term(input: &str) -> IResult<&str, ParseResult<Term>> {
-//         preceded(
-//             ms0,
-//             alt((
-//                 map(tag("true"), |_| -> ParseResult<_> { box |_| TmTrue }),
-//                 map(tag("false"), |_| -> ParseResult<_> { box |_| TmFalse }),
-//                 map(tag("unit"), |_| -> ParseResult<_> { box |_| TmUnit }),
-//                 map(identifier, |s| -> ParseResult<_> {
-//                     box move |ctx| TmVar(ctx.name2index(&s).expect(&format!("{} not found", s)))
-//                 }),
-//                 delimited(char('('), term_seq, pair(ms0, char(')'))),
-//                 // String
-//                 map(string_value, |s: String| -> ParseResult<_> {
-//                     box move |_| TmString(s.clone())
-//                 }),
-//                 // Nat
-//                 map(int_value, |n| -> ParseResult<_> {
-//                     box move |_| {
-//                         let mut result = TmZero;
-//                         for _ in 0..n {
-//                             result = TmSucc(box result);
-//                         }
-//                         result
-//                     }
-//                 }),
-//                 map(double, |d| -> ParseResult<_> { box move |_| TmFloat(d) }),
-//                 // Record
-//                 map(
-//                     delimited(char('{'), fields, pair(ms0, char('}'))),
-//                     |fs| -> ParseResult<_> { box move |ctx| TmRecord(fs(ctx)) },
-//                 ),
-//                 // Tag
-//                 map(
-//                     tuple((
-//                         char('<'),
-//                         label,
-//                         preceded(ms0, char('=')),
-//                         term,
-//                         preceded(ms0, char('>')),
-//                         preceded(ms0, tag("as")),
-//                         all_type,
-//                     )),
-//                     |(_, l, _, ft, _, _, fty)| -> ParseResult<_> {
-//                         box move |ctx| TmTag(l.clone(), box ft(ctx), fty(ctx))
-//                     },
-//                 ),
-//             )),
-//         )(input)
-//     }
+    fn arrow_type(input: &str) -> IResult<&str, ParseResult<Ty>> {
+        alt((
+            map(
+                tuple((atomic_type, pair(ms0, tag("->")), arrow_type)),
+                |(f1, _, f2)| -> ParseResult<Ty> { box move |ctx| TyArr(box f1(ctx), box f2(ctx)) },
+            ),
+            atomic_type,
+        ))(input)
+    }
 
-//     fn fields(input: &str) -> IResult<&str, ParseResult<Vec<(String, Term)>>> {
-//         map(
-//             separated_list(pair(ms0, char(',')), field),
-//             |fs| -> ParseResult<_> {
-//                 box move |ctx| fs.iter().enumerate().map(|(i, f)| f(ctx, i + 1)).collect()
-//             },
-//         )(input)
-//     }
+    fn atomic_type(input: &str) -> IResult<&str, ParseResult<Ty>> {
+        preceded(
+            ms0,
+            alt((
+                delimited(lparen, ty, rparen),
+                map(ucid, |id| -> ParseResult<Ty> {
+                    box move |ctx| {
+                        if ctx.is_name_bound(&id) {
+                            TyVar(ctx.name2index(&id).unwrap()) // TODO
+                        } else {
+                            panic!("NO {} Type!", id); // TODO
+                        }
+                    }
+                }),
+                map(
+                    tuple((pair(lcurly, some), ucid, comma, ty, rparen)),
+                    |(_, id, _, fty, _)| -> ParseResult<Ty> {
+                        box move |ctx| {
+                            ctx.with_name(id.to_string(), |ctx| TySome(id.clone(), box fty(ctx)))
+                        }
+                    },
+                ),
+            )),
+        )(input)
+    }
 
-//     type FieldResult = Box<dyn Fn(&mut Context, usize) -> (String, Term)>;
+    // #[test]
+    // fn test() {
+    //     let testcases = vec![
+    //         // Bool,
+    //         ("true", "true", "Bool"),
+    //         (
+    //             "(λ x: Bool -> Bool. if x true then true else false) (λ x: Bool. x)",
+    //             "true",
+    //             "Bool",
+    //         ),
+    //         (
+    //             "(λ x: Bool -> Bool -> Bool. x true false) (λ x: Bool. λ y: Bool. true)",
+    //             "true",
+    //             "Bool",
+    //         ),
+    //         // Unit
+    //         ("unit", "unit", "Unit"),
+    //         ("λ x: Bool. unit", "λ x: Bool. unit", "Bool -> Unit"),
+    //         ("(λ x: Bool. unit) true", "unit", "Unit"),
+    //         // Seq
+    //         ("(unit; 42)", "42", "Nat"),
+    //         (
+    //             "λ x: Bool. (unit; 42)",
+    //             "λ x: Bool. (λ _: Unit. 42) unit",
+    //             "Bool -> Nat",
+    //         ),
+    //         // Nat
+    //         ("(λ x: Nat. succ x) 41", "42", "Nat"),
+    //         ("(λ x: Nat. if iszero x then 42 else 0) 0", "42", "Nat"),
+    //         ("(λ x: Nat. if iszero x then 42 else 0) 1", "0", "Nat"),
+    //         // String
+    //         (r#""hello""#, r#""hello""#, "String"),
+    //         (r#"λ x: Bool. "hello""#, r#"λ x: Bool. "hello""#, "Bool -> String"),
+    //         // Float
+    //         ("1.2", "1.2", "Float"),
+    //         ("timesfloat 2.5 2.0", "5", "Float"),
+    //         ("λ x: Float. timesfloat x 2.0", "λ x: Float. timesfloat x 2", "Float -> Float"),
+    //         // Let
+    //         ("let x=true in x", "true", "Bool"),
+    //         ("let x=0 in let f=λ x: Nat. succ x in f x", "1", "Nat"),
+    //         // Fix
+    //         (
+    //             "(fix (λ f: Nat -> Nat -> Nat. λ m: Nat. λ n: Nat. if iszero m then n else succ (f (pred m) n))) 40 2",
+    //             "42",
+    //             "Nat",
+    //         ),
+    //         // Letrec
+    //         (
+    //             "
+    //             letrec plus: Nat -> Nat -> Nat =
+    //               λ m: Nat. λ n: Nat.
+    //                 if iszero m then n else succ (plus (pred m) n) in
+    //             letrec times: Nat -> Nat -> Nat =
+    //               λ m: Nat. λ n: Nat.
+    //                 if iszero m then 0 else plus n (times (pred m) n) in
+    //             letrec factorial: Nat -> Nat =
+    //               λ m: Nat.
+    //                 if iszero m then 1 else times m (factorial (pred m)) in
+    //             factorial 5
+    //             ",
+    //             "120",
+    //             "Nat",
+    //         ),
+    //         // As
+    //         ("true as Bool", "true", "Bool"),
+    //         ("λ x:Bool. x as Bool", "λ x: Bool. x as Bool", "Bool -> Bool"),
+    //         // Ref
+    //         ("let r = ref 40 in (r := succ(!r); r := succ(!r); !r)", "42", "Nat"),
+    //         // TmAbbBind
+    //         ("x = 41; succ x", "42", "Nat"),
+    //         ("r = ref 40; r := succ(!r); r := succ(!r); !r", "42", "Nat"),
+    //         (
+    //             "
+    //             z = 0;
+    //             plus = fix (λ f: Nat -> Nat -> Nat. λ m: Nat. λ n: Nat. if iszero m then n else succ (f (pred m) n));
+    //             times = fix (λ f: Nat -> Nat -> Nat. λ m: Nat. λ n: Nat. if iszero m then z else plus n (f (pred m) n));
+    //             times 6 7
+    //             ",
+    //             "42",
+    //             "Nat"
+    //         ),
+    //         // Record
+    //         ("{x=true, y=1}", "{x = true, y = 1}", "{x: Bool, y: Nat}"),
+    //         ("{x=true, y=1}.x", "true", "Bool"),
+    //         ("{true, 1}", "{1 = true, 2 = 1}", "{1: Bool, 2: Nat}"),
+    //         ("{true, 1}.1", "true", "Bool"),
+    //         ("{1, {2, {3}}}.2.2.1", "3", "Nat"),
+    //         ("{x = (λ x: Nat. succ x) 0, y = succ 10}", "{x = 1, y = 11}", "{x: Nat, y: Nat}"),
+    //         ("(λ r: {x: Nat, y: Bool}. r.x) {x = 42, y = true}", "42", "Nat"),
+    //         // Variant
+    //         ("λ x: <a: Bool, b: Bool>. x", "λ x: <a: Bool, b: Bool>. x", "<a: Bool, b: Bool> -> <a: Bool, b: Bool>"),
+    //         ("<x = 10> as <x: Nat, b: Bool>", "<x = 10> as <x: Nat, b: Bool>", "<x: Nat, b: Bool>"),
+    //         (
+    //             "(λ o: <some: Nat, none: Unit>. case o of <some = n> => succ (n) | <none = u> => 0) <none = unit> as <some: Nat, none: Unit>",
+    //             "0",
+    //             "Nat",
+    //         ),
+    //         (
+    //             "
+    //             s = λ o: <some: Nat, none: Unit>.
+    //                   case o of <some = n> => succ (n)
+    //                           | <none = u> => 0;
+    //             o = <some = 10> as <some: Nat, none: Unit>;
+    //             s o;
+    //             ",
+    //             "11",
+    //             "Nat"
+    //         ),
+    //         // Other
+    //         (
+    //             "
+    //             counter = λ c: Nat. let v = ref c in {inc=λ u: Unit. (v := succ (!v); !v), dec=λ u: Unit. (v := pred (!v); !v)};
+    //             c = counter 10;
+    //             c.inc unit;
+    //             c.inc unit;
+    //             c.dec unit;
+    //             c.inc unit;
+    //             ",
+    //             "12",
+    //             "Nat",
+    //         ),
+    //     ];
 
-//     fn field(input: &str) -> IResult<&str, FieldResult> {
-//         alt((
-//             map(
-//                 tuple((label, ms0, char('='), term)),
-//                 |(l, _, _, f)| -> FieldResult { box move |ctx, _| (l.clone(), f(ctx)) },
-//             ),
-//             map(term, |f| -> FieldResult {
-//                 box move |ctx, i| (format!("{}", i), f(ctx))
-//             }),
-//         ))(input)
-//     }
+    //     for (input, expect_term, expect_ty) in testcases {
+    //         let result = parser::parse(input);
+    //         assert!(result.is_ok(), "{}", input);
+    //         let (_, commands) = result.unwrap();
 
-//     const RESERVED_KEYWORDS: &'static [&'static str] = &[
-//         "true", "false", "if", "then", "else", "succ", "pred", "iszero", "let", "in", "fix",
-//         "unit", "ref", "case", "of",
-//     ];
+    //         let mut ctx = Context::new();
+    //         let mut store = Store::new();
+    //         let mut result = None;
+    //         for c in commands {
+    //             match c {
+    //                 Command::Eval(t) => result = Some(t.eval(&ctx, &mut store)),
+    //                 Command::Bind(s, b) => {
+    //                     let b = b.check(&mut ctx).eval(&ctx, &mut store);
+    //                     ctx.add_binding(s, b);
+    //                     store.shift(1)
+    //                 }
+    //             }
+    //         }
 
-//     fn identifier(input: &str) -> IResult<&str, String> {
-//         verify(
-//             map(pair(alpha1, alphanumeric0), |(s1, s2)| {
-//                 format!("{}{}", s1, s2)
-//             }),
-//             |s: &String| !RESERVED_KEYWORDS.iter().any(|x| x == &s),
-//         )(input)
-//     }
-
-//     fn int_value(input: &str) -> IResult<&str, u32> {
-//         map(pair(digit1, not(peek(char('.')))), |(s, _): (&str, _)| {
-//             s.parse().unwrap()
-//         })(input)
-//     }
-
-//     fn string_value(input: &str) -> IResult<&str, String> {
-//         map(delimited(char('"'), many0(none_of("\"")), char('"')), |s| {
-//             s.iter().collect()
-//         })(input)
-//     }
-// }
-
-// #[test]
-// fn test() {
-//     let testcases = vec![
-//         // Bool,
-//         ("true", "true", "Bool"),
-//         (
-//             "(λ x: Bool -> Bool. if x true then true else false) (λ x: Bool. x)",
-//             "true",
-//             "Bool",
-//         ),
-//         (
-//             "(λ x: Bool -> Bool -> Bool. x true false) (λ x: Bool. λ y: Bool. true)",
-//             "true",
-//             "Bool",
-//         ),
-//         // Unit
-//         ("unit", "unit", "Unit"),
-//         ("λ x: Bool. unit", "λ x: Bool. unit", "Bool -> Unit"),
-//         ("(λ x: Bool. unit) true", "unit", "Unit"),
-//         // Seq
-//         ("(unit; 42)", "42", "Nat"),
-//         (
-//             "λ x: Bool. (unit; 42)",
-//             "λ x: Bool. (λ _: Unit. 42) unit",
-//             "Bool -> Nat",
-//         ),
-//         // Nat
-//         ("(λ x: Nat. succ x) 41", "42", "Nat"),
-//         ("(λ x: Nat. if iszero x then 42 else 0) 0", "42", "Nat"),
-//         ("(λ x: Nat. if iszero x then 42 else 0) 1", "0", "Nat"),
-//         // String
-//         (r#""hello""#, r#""hello""#, "String"),
-//         (r#"λ x: Bool. "hello""#, r#"λ x: Bool. "hello""#, "Bool -> String"),
-//         // Float
-//         ("1.2", "1.2", "Float"),
-//         ("timesfloat 2.5 2.0", "5", "Float"),
-//         ("λ x: Float. timesfloat x 2.0", "λ x: Float. timesfloat x 2", "Float -> Float"),
-//         // Let
-//         ("let x=true in x", "true", "Bool"),
-//         ("let x=0 in let f=λ x: Nat. succ x in f x", "1", "Nat"),
-//         // Fix
-//         (
-//             "(fix (λ f: Nat -> Nat -> Nat. λ m: Nat. λ n: Nat. if iszero m then n else succ (f (pred m) n))) 40 2",
-//             "42",
-//             "Nat",
-//         ),
-//         // Letrec
-//         (
-//             "
-//             letrec plus: Nat -> Nat -> Nat =
-//               λ m: Nat. λ n: Nat.
-//                 if iszero m then n else succ (plus (pred m) n) in
-//             letrec times: Nat -> Nat -> Nat =
-//               λ m: Nat. λ n: Nat.
-//                 if iszero m then 0 else plus n (times (pred m) n) in
-//             letrec factorial: Nat -> Nat =
-//               λ m: Nat.
-//                 if iszero m then 1 else times m (factorial (pred m)) in
-//             factorial 5
-//             ",
-//             "120",
-//             "Nat",
-//         ),
-//         // As
-//         ("true as Bool", "true", "Bool"),
-//         ("λ x:Bool. x as Bool", "λ x: Bool. x as Bool", "Bool -> Bool"),
-//         // Ref
-//         ("let r = ref 40 in (r := succ(!r); r := succ(!r); !r)", "42", "Nat"),
-//         // TmAbbBind
-//         ("x = 41; succ x", "42", "Nat"),
-//         ("r = ref 40; r := succ(!r); r := succ(!r); !r", "42", "Nat"),
-//         (
-//             "
-//             z = 0;
-//             plus = fix (λ f: Nat -> Nat -> Nat. λ m: Nat. λ n: Nat. if iszero m then n else succ (f (pred m) n));
-//             times = fix (λ f: Nat -> Nat -> Nat. λ m: Nat. λ n: Nat. if iszero m then z else plus n (f (pred m) n));
-//             times 6 7
-//             ",
-//             "42",
-//             "Nat"
-//         ),
-//         // Record
-//         ("{x=true, y=1}", "{x = true, y = 1}", "{x: Bool, y: Nat}"),
-//         ("{x=true, y=1}.x", "true", "Bool"),
-//         ("{true, 1}", "{1 = true, 2 = 1}", "{1: Bool, 2: Nat}"),
-//         ("{true, 1}.1", "true", "Bool"),
-//         ("{1, {2, {3}}}.2.2.1", "3", "Nat"),
-//         ("{x = (λ x: Nat. succ x) 0, y = succ 10}", "{x = 1, y = 11}", "{x: Nat, y: Nat}"),
-//         ("(λ r: {x: Nat, y: Bool}. r.x) {x = 42, y = true}", "42", "Nat"),
-//         // Variant
-//         ("λ x: <a: Bool, b: Bool>. x", "λ x: <a: Bool, b: Bool>. x", "<a: Bool, b: Bool> -> <a: Bool, b: Bool>"),
-//         ("<x = 10> as <x: Nat, b: Bool>", "<x = 10> as <x: Nat, b: Bool>", "<x: Nat, b: Bool>"),
-//         (
-//             "(λ o: <some: Nat, none: Unit>. case o of <some = n> => succ (n) | <none = u> => 0) <none = unit> as <some: Nat, none: Unit>",
-//             "0",
-//             "Nat",
-//         ),
-//         (
-//             "
-//             s = λ o: <some: Nat, none: Unit>.
-//                   case o of <some = n> => succ (n)
-//                           | <none = u> => 0;
-//             o = <some = 10> as <some: Nat, none: Unit>;
-//             s o;
-//             ",
-//             "11",
-//             "Nat"
-//         ),
-//         // Other
-//         (
-//             "
-//             counter = λ c: Nat. let v = ref c in {inc=λ u: Unit. (v := succ (!v); !v), dec=λ u: Unit. (v := pred (!v); !v)};
-//             c = counter 10;
-//             c.inc unit;
-//             c.inc unit;
-//             c.dec unit;
-//             c.inc unit;
-//             ",
-//             "12",
-//             "Nat",
-//         ),
-//     ];
-
-//     for (input, expect_term, expect_ty) in testcases {
-//         let result = parser::parse(input);
-//         assert!(result.is_ok(), "{}", input);
-//         let (_, commands) = result.unwrap();
-
-//         let mut ctx = Context::new();
-//         let mut store = Store::new();
-//         let mut result = None;
-//         for c in commands {
-//             match c {
-//                 Command::Eval(t) => result = Some(t.eval(&ctx, &mut store)),
-//                 Command::Bind(s, b) => {
-//                     let b = b.check(&mut ctx).eval(&ctx, &mut store);
-//                     ctx.add_binding(s, b);
-//                     store.shift(1)
-//                 }
-//             }
-//         }
-
-//         assert!(result.is_some(), "{}", input);
-//         let t = result.unwrap();
-//         assert_eq!(expect_term, format!("{}", t), "{}", input);
-//         assert_eq!(expect_ty, format!("{}", t.ty(&mut ctx)), "{}", input);
-//     }
-// }
+    //         assert!(result.is_some(), "{}", input);
+    //         let t = result.unwrap();
+    //         assert_eq!(expect_term, format!("{}", t), "{}", input);
+    //         assert_eq!(expect_ty, format!("{}", t.ty(&mut ctx)), "{}", input);
+    //     }
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let ctx = Context::new();
-    let t = TmTAbs("X".into(), box TmAbs("x".into(), TyVar(0), box TmVar(0)));
+    let mut ctx = Context::new();
+    let (_, ft) = parser::term("(λX. λx:X. x) [∀X. X -> X] (λX. λx:X. x)").unwrap();
+    let t = ft(&mut ctx);
 
     println!("t = {:?}", t);
     println!("t.eval(...) = {:?}", t.eval(&ctx));
