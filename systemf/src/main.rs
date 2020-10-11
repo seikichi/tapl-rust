@@ -100,6 +100,20 @@ impl Context {
         }
     }
 
+    fn is_tyabb(&self, i: usize) -> bool {
+        match self.get_binding(i) {
+            TyAbbBind(ty) => true,
+            _ => false,
+        }
+    }
+
+    fn get_tyabb(&self, i: usize) -> Ty {
+        match self.get_binding(i) {
+            TyAbbBind(ty) => ty,
+            _ => panic!("No TyAbbBind"),
+        }
+    }
+
     fn with_fresh_name<R, F: FnOnce(&mut Self, String) -> R>(&mut self, x: &str, f: F) -> R {
         let mut name: String = x.into();
         while self.is_name_bound(&name) {
@@ -219,6 +233,37 @@ impl Term {
         }
         t
     }
+
+    fn ty(&self, ctx: &mut Context) -> Ty {
+        match self {
+            TmVar(i) => ctx.get_type(*i),
+            TmAbs(x, tyt1, t2) => ctx.with_binding(x.to_string(), VarBind(tyt1.clone()), |ctx| {
+                let tyt2 = t2.ty(ctx);
+                TyArr(box tyt1.clone(), box tyt2.shift(-1))
+            }),
+            TmApp(t1, t2) => {
+                let tyt1 = t1.ty(ctx);
+                let tyt2 = t2.ty(ctx);
+                match tyt1.simplify(ctx) {
+                    TyArr(box tyt11, box tyt12) if tyt2.eqv(&tyt11, ctx) => tyt12,
+                    TyArr(_, _) => panic!("parameter type mismatch"),
+                    _ => panic!("arrow type expected"),
+                }
+            }
+            TmTAbs(tyx, t2) => ctx.with_binding(tyx.to_string(), TyVarBind, |ctx| {
+                let tyt2 = t2.ty(ctx);
+                TyAll(tyx.clone(), box tyt2)
+            }),
+            TmTApp(t1, tyt2) => {
+                let tyt1 = t1.ty(ctx);
+                match tyt1.simplify(ctx) {
+                    TyAll(_, tyt12) => tyt12.subst_top(tyt2),
+                    _ => panic!("universal type expected"),
+                }
+            }
+            _ => panic!("unimplemented"), // TODO
+        }
+    }
 }
 
 impl Ty {
@@ -251,6 +296,40 @@ impl Ty {
 
     fn subst_top(&self, s: &Self) -> Self {
         self.subst(0, &s.shift(1)).shift(-1)
+    }
+
+    fn compute(&self, ctx: &Context) -> Option<Self> {
+        match self {
+            TyVar(i) if ctx.is_tyabb(*i) => Some(ctx.get_tyabb(*i)),
+            _ => None,
+        }
+    }
+
+    fn simplify(&self, ctx: &Context) -> Self {
+        let mut ty = self.clone();
+        while let Some(next) = ty.compute(ctx) {
+            ty = next;
+        }
+        ty
+    }
+
+    fn eqv(&self, rhs: &Ty, ctx: &mut Context) -> bool {
+        let tys = self.simplify(ctx);
+        let tyt = rhs.simplify(ctx);
+
+        match (&tys, &tyt) {
+            (TyVar(i), _) if ctx.is_tyabb(*i) => ctx.get_tyabb(*i).eqv(&tyt, ctx),
+            (_, TyVar(i)) if ctx.is_tyabb(*i) => tys.eqv(&ctx.get_tyabb(*i), ctx),
+            (TyVar(i), TyVar(j)) => i == j,
+            (TyArr(tys1, tys2), TyArr(tyt1, tyt2)) => tys1.eqv(&tyt1, ctx) && tys2.eqv(&tyt2, ctx),
+            (TySome(tyx1, tys2), TySome(_, tyt2)) => {
+                ctx.with_name(tyx1.to_string(), |ctx| tys2.eqv(&tyt2, ctx))
+            }
+            (TyAll(tyx1, tys2), TyAll(_, tyt2)) => {
+                ctx.with_name(tyx1.to_string(), |ctx| tys2.eqv(&tyt2, ctx))
+            }
+            _ => false,
+        }
     }
 }
 
@@ -561,6 +640,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         and = λb:CBool. λc:CBool. λX. λt:X. λf:X. b [X] (c [X] t f) f;
         and tru tru [CBool] tru fls;
         and tru fls [CBool] tru fls;
+        and tru fls [CBool];
+
+        id = λX. λx:X. x;
+        id [CBool] tru;
         ",
     )
     .unwrap();
@@ -575,7 +658,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match cmd {
             Eval(t) => {
                 let t = t.eval(&ctx);
-                println!("{:?}", t);
+                let ty = t.ty(&mut ctx);
+                println!("{:?}: {:?}", t, ty);
             }
             Bind(x, bind) => {
                 let bind = bind.eval(&ctx);
