@@ -331,6 +331,61 @@ impl Ty {
             _ => false,
         }
     }
+
+    fn format(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TyAll(tyx, tyt2) => ctx.with_fresh_name(&tyx, |ctx, n| {
+                write!(f, "∀{}. ", n)?;
+                tyt2.format(ctx, f)
+            }),
+            _ => self.format_arrow(ctx, f),
+        }
+    }
+
+    fn format_arrow(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TyArr(tyt1, tyt2) => {
+                tyt1.format(ctx, f)?;
+                write!(f, " -> ")?;
+                tyt2.format(ctx, f)
+            }
+            _ => self.format_atomic(ctx, f),
+        }
+    }
+
+    fn format_atomic(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TyVar(x) => write!(f, "{}", ctx.index2name(*x).unwrap()),
+            TySome(tyx, tyt2) => {
+                write!(f, "{{∃{}, ", tyx)?;
+                tyt2.format(ctx, f)?;
+                write!(f, "}}")
+            }
+            _ => {
+                write!(f, "(")?;
+                self.format(ctx, f)?;
+                write!(f, ")")
+            }
+        }
+    }
+
+    fn display(&self, ctx: &Context) -> TyDisplay {
+        TyDisplay {
+            ty: self.clone(),
+            ctx: ctx.clone(),
+        }
+    }
+}
+
+struct TyDisplay {
+    ty: Ty,
+    ctx: Context,
+}
+
+impl fmt::Display for TyDisplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.ty.format(&mut self.ctx.clone(), f)
+    }
 }
 
 impl Binding {
@@ -659,7 +714,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Eval(t) => {
                 let t = t.eval(&ctx);
                 let ty = t.ty(&mut ctx);
-                println!("{:?}: {:?}", t, ty);
+                println!("{:?}: {}", t, ty.display(&ctx));
             }
             Bind(x, bind) => {
                 let bind = bind.eval(&ctx);
