@@ -102,7 +102,7 @@ impl Context {
 
     fn is_tyabb(&self, i: usize) -> bool {
         match self.get_binding(i) {
-            TyAbbBind(ty) => true,
+            TyAbbBind(_) => true,
             _ => false,
         }
     }
@@ -112,14 +112,6 @@ impl Context {
             TyAbbBind(ty) => ty,
             _ => panic!("No TyAbbBind"),
         }
-    }
-
-    fn with_fresh_name<R, F: FnOnce(&mut Self, String) -> R>(&mut self, x: &str, f: F) -> R {
-        let mut name: String = x.into();
-        while self.is_name_bound(&name) {
-            name.push_str("'");
-        }
-        self.with_name(name.clone(), move |ctx| f(ctx, name))
     }
 
     fn is_name_bound(&self, x: &str) -> bool {
@@ -487,23 +479,19 @@ mod parser {
     use nom::{
         branch::alt,
         bytes::complete::tag,
-        character::complete::{
-            alpha1, alphanumeric0, char, digit1, multispace0 as ms0, multispace1 as ms1, none_of,
-            one_of,
-        },
-        combinator::{map, not, peek, recognize, verify},
-        multi::{many0, many1, separated_list, separated_nonempty_list},
-        number::complete::double,
-        sequence::{delimited, pair, preceded, terminated, tuple},
+        character::complete::{char, multispace0 as ms0, multispace1 as ms1, one_of},
+        combinator::{map, recognize, verify},
+        multi::{many1, separated_list},
+        sequence::{delimited, pair, preceded, tuple},
         IResult,
     };
 
     // tokens
-    const id_chars: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
+    const ID_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
 
     fn id(input: &str) -> IResult<&str, Rc<str>> {
         map(
-            preceded(ms0, recognize(many1(one_of(id_chars)))),
+            preceded(ms0, recognize(many1(one_of(ID_CHARS)))),
             |s: &str| s.into(),
         )(input)
     }
