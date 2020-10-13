@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ty {
-    TyVar(usize),
+    TyVar(Rc<str>, usize),
     TyArr(Box<Ty>, Box<Ty>),
     TyAll(Rc<str>, Box<Ty>),
     TySome(Rc<str>, Box<Ty>),
@@ -15,7 +15,7 @@ pub enum Ty {
 
 #[derive(Debug, Clone)]
 pub enum Term {
-    TmVar(usize),
+    TmVar(Rc<str>, usize),
     TmAbs(Rc<str>, Ty, Box<Term>),
     TmApp(Box<Term>, Box<Term>),
     TmTAbs(Rc<str>, Box<Term>),
@@ -128,14 +128,14 @@ impl Context {
 }
 
 impl Term {
-    fn map<F: Copy + Fn(i32, usize) -> Self, TF: Copy + Fn(i32, &Ty) -> Ty>(
+    fn map<F: Copy + Fn(i32, Rc<str>, usize) -> Self, TF: Copy + Fn(i32, &Ty) -> Ty>(
         &self,
         c: i32,
         onvar: F,
         ontype: TF,
     ) -> Self {
         match &self {
-            TmVar(x) => onvar(c, *x),
+            TmVar(n, x) => onvar(c, n.clone(), *x),
             TmAbs(x, ty1, t2) => TmAbs(x.clone(), ontype(c, ty1), box t2.map(c + 1, onvar, ontype)),
             TmApp(t1, t2) => TmApp(box t1.map(c, onvar, ontype), box t2.map(c, onvar, ontype)),
             TmTAbs(tyx, t2) => TmTAbs(tyx.clone(), box t2.map(c + 1, onvar, ontype)),
@@ -155,11 +155,11 @@ impl Term {
     fn shift_above(&self, d: i32, c: i32) -> Self {
         self.map(
             c,
-            |c, x| {
+            |c, n, x| {
                 if x as i32 >= c {
-                    TmVar((x as i32 + d) as usize)
+                    TmVar(n, (x as i32 + d) as usize)
                 } else {
-                    TmVar(x)
+                    TmVar(n, x)
                 }
             },
             |c, ty| ty.shift_above(d, c),
@@ -173,7 +173,13 @@ impl Term {
     fn subst(&self, j: i32, s: &Self) -> Self {
         self.map(
             j,
-            |j, x| if x as i32 == j { s.shift(j) } else { TmVar(x) },
+            |j, n, x| {
+                if x as i32 == j {
+                    s.shift(j)
+                } else {
+                    TmVar(n, x)
+                }
+            },
             |_, ty| ty.clone(),
         )
     }
@@ -183,7 +189,7 @@ impl Term {
     }
 
     fn ty_subst(&self, j: i32, ty: &Ty) -> Self {
-        self.map(j, |_, x| TmVar(x), |j, ty2| ty2.subst(j, ty))
+        self.map(j, |_, n, x| TmVar(n, x), |j, ty2| ty2.subst(j, ty))
     }
 
     fn ty_subst_top(&self, ty: &Ty) -> Self {
@@ -214,7 +220,7 @@ impl Term {
             }
             TmPack(ty1, t2, ty3) => TmPack(ty1.clone(), box t2.eval1(ctx)?, ty3.clone()),
             // Var
-            TmVar(n) => match ctx.get_binding(*n) {
+            TmVar(_, n) => match ctx.get_binding(*n) {
                 TmAbbBind(t, _) => t.clone(),
                 _ => return None,
             },
@@ -236,7 +242,7 @@ impl Term {
 
     fn ty(&self, ctx: &mut Context) -> Ty {
         match self {
-            TmVar(i) => ctx.get_type(*i),
+            TmVar(_, i) => ctx.get_type(*i),
             TmAbs(x, tyt1, t2) => ctx.with_binding(x.to_string(), VarBind(tyt1.clone()), |ctx| {
                 let tyt2 = t2.ty(ctx);
                 TyArr(box tyt1.clone(), box tyt2.shift(-1))
@@ -264,12 +270,42 @@ impl Term {
             _ => panic!("unimplemented"), // TODO
         }
     }
+
+    fn fix(&mut self, ctx: &mut Context) {
+        match self {
+            TmVar(s, x) => *x = ctx.name2index(s).unwrap(),
+            TmAbs(s, ty, t) => {
+                ty.fix(ctx);
+                ctx.with_name(s.to_string(), |ctx| t.fix(ctx))
+            }
+            TmApp(t1, t2) => {
+                t1.fix(ctx);
+                t2.fix(ctx)
+            }
+            TmTAbs(s, t) => ctx.with_name(s.to_string(), |ctx| t.fix(ctx)),
+            TmTApp(t, ty) => {
+                t.fix(ctx);
+                ty.fix(ctx)
+            }
+            TmPack(ty1, t2, ty3) => {
+                ty1.fix(ctx);
+                t2.fix(ctx);
+                ty3.fix(ctx);
+            }
+            TmUnpack(s1, s2, t1, t2) => {
+                t1.fix(ctx);
+                ctx.with_name(s1.to_string(), |ctx| {
+                    ctx.with_name(s2.to_string(), |ctx| t2.fix(ctx))
+                })
+            }
+        }
+    }
 }
 
 impl Ty {
-    fn map<F: Copy + Fn(i32, usize) -> Self>(&self, c: i32, onvar: F) -> Self {
+    fn map<F: Copy + Fn(i32, Rc<str>, usize) -> Self>(&self, c: i32, onvar: F) -> Self {
         match &self {
-            TyVar(x) => onvar(c, *x),
+            TyVar(s, x) => onvar(c, s.clone(), *x),
             TyArr(ty1, ty2) => TyArr(box ty1.map(c, onvar), box ty2.map(c, onvar)),
             TyAll(tyx, ty2) => TyAll(tyx.clone(), box ty2.map(c + 1, onvar)),
             TySome(tyx, ty2) => TySome(tyx.clone(), box ty2.map(c + 1, onvar)),
@@ -277,11 +313,11 @@ impl Ty {
     }
 
     fn shift_above(&self, d: i32, c: i32) -> Self {
-        self.map(c, |c, x| {
+        self.map(c, |c, s, x| {
             if x as i32 >= c {
-                TyVar((x as i32 + d) as usize)
+                TyVar(s, (x as i32 + d) as usize)
             } else {
-                TyVar(x)
+                TyVar(s, x)
             }
         })
     }
@@ -291,7 +327,13 @@ impl Ty {
     }
 
     fn subst(&self, j: i32, s: &Self) -> Self {
-        self.map(j, |j, x| if x as i32 == j { s.shift(j) } else { TyVar(x) })
+        self.map(j, |j, n, x| {
+            if x as i32 == j {
+                s.shift(j)
+            } else {
+                TyVar(n, x)
+            }
+        })
     }
 
     fn subst_top(&self, s: &Self) -> Self {
@@ -300,7 +342,7 @@ impl Ty {
 
     fn compute(&self, ctx: &Context) -> Option<Self> {
         match self {
-            TyVar(i) if ctx.is_tyabb(*i) => Some(ctx.get_tyabb(*i)),
+            TyVar(_, i) if ctx.is_tyabb(*i) => Some(ctx.get_tyabb(*i)),
             _ => None,
         }
     }
@@ -318,9 +360,9 @@ impl Ty {
         let tyt = rhs.simplify(ctx);
 
         match (&tys, &tyt) {
-            (TyVar(i), _) if ctx.is_tyabb(*i) => ctx.get_tyabb(*i).eqv(&tyt, ctx),
-            (_, TyVar(i)) if ctx.is_tyabb(*i) => tys.eqv(&ctx.get_tyabb(*i), ctx),
-            (TyVar(i), TyVar(j)) => i == j,
+            (TyVar(_, i), _) if ctx.is_tyabb(*i) => ctx.get_tyabb(*i).eqv(&tyt, ctx),
+            (_, TyVar(_, i)) if ctx.is_tyabb(*i) => tys.eqv(&ctx.get_tyabb(*i), ctx),
+            (TyVar(_, i), TyVar(_, j)) => i == j,
             (TyArr(tys1, tys2), TyArr(tyt1, tyt2)) => tys1.eqv(&tyt1, ctx) && tys2.eqv(&tyt2, ctx),
             (TySome(tyx1, tys2), TySome(_, tyt2)) => {
                 ctx.with_name(tyx1.to_string(), |ctx| tys2.eqv(&tyt2, ctx))
@@ -332,59 +374,59 @@ impl Ty {
         }
     }
 
-    fn format(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fix(&mut self, ctx: &mut Context) {
         match self {
-            TyAll(tyx, tyt2) => ctx.with_fresh_name(&tyx, |ctx, n| {
-                write!(f, "∀{}. ", n)?;
-                tyt2.format(ctx, f)
-            }),
-            _ => self.format_arrow(ctx, f),
+            TyVar(s, n) => *n = ctx.name2index(s).unwrap(),
+            TyArr(ty1, ty2) => {
+                ty1.fix(ctx);
+                ty2.fix(ctx);
+            }
+            TyAll(s, ty) => ctx.with_name(s.to_string(), |ctx| ty.fix(ctx)),
+            TySome(s, ty) => ctx.with_name(s.to_string(), |ctx| ty.fix(ctx)),
         }
     }
 
-    fn format_arrow(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn format(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TyAll(tyx, tyt2) => {
+                write!(f, "∀{}. ", tyx)?;
+                tyt2.format(f)
+            }
+            _ => self.format_arrow(f),
+        }
+    }
+
+    fn format_arrow(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TyArr(tyt1, tyt2) => {
-                tyt1.format(ctx, f)?;
+                tyt1.format(f)?;
                 write!(f, " -> ")?;
-                tyt2.format(ctx, f)
+                tyt2.format(f)
             }
-            _ => self.format_atomic(ctx, f),
+            _ => self.format_atomic(f),
         }
     }
 
-    fn format_atomic(&self, ctx: &mut Context, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn format_atomic(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TyVar(x) => write!(f, "{}", ctx.index2name(*x).unwrap()),
+            TyVar(s, _) => write!(f, "{}", s),
             TySome(tyx, tyt2) => {
                 write!(f, "{{∃{}, ", tyx)?;
-                tyt2.format(ctx, f)?;
+                tyt2.format(f)?;
                 write!(f, "}}")
             }
             _ => {
                 write!(f, "(")?;
-                self.format(ctx, f)?;
+                self.format(f)?;
                 write!(f, ")")
             }
         }
     }
-
-    fn display(&self, ctx: &Context) -> TyDisplay {
-        TyDisplay {
-            ty: self.clone(),
-            ctx: ctx.clone(),
-        }
-    }
 }
 
-struct TyDisplay {
-    ty: Ty,
-    ctx: Context,
-}
-
-impl fmt::Display for TyDisplay {
+impl fmt::Display for Ty {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.ty.format(&mut self.ctx.clone(), f)
+        self.format(f)
     }
 }
 
@@ -406,6 +448,37 @@ impl Binding {
             _ => self.clone(), // FIXME
         }
     }
+
+    fn fix(&mut self, ctx: &mut Context) {
+        match self {
+            NameBind => {}
+            VarBind(ty) => ty.fix(ctx),
+            TyVarBind => {}
+            TyAbbBind(ty) => ty.fix(ctx),
+            TmAbbBind(t, None) => t.fix(ctx),
+            TmAbbBind(t, Some(ty)) => {
+                t.fix(ctx);
+                ty.fix(ctx);
+            }
+        }
+    }
+}
+
+impl Command {
+    fn fix(&mut self, ctx: &mut Context) {
+        match self {
+            Eval(t) => t.fix(ctx),
+            Bind(s, b) => {
+                b.fix(ctx);
+                ctx.add_name(s.to_string())
+            }
+            SomeBind(s1, s2, t) => {
+                t.fix(ctx);
+                ctx.add_name(s1.to_string());
+                ctx.add_name(s2.to_string());
+            }
+        }
+    }
 }
 
 mod parser {
@@ -424,8 +497,6 @@ mod parser {
         sequence::{delimited, pair, preceded, terminated, tuple},
         IResult,
     };
-
-    type ParseResult<T> = Box<dyn Fn(&mut Context) -> T>;
 
     // tokens
     const id_chars: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
@@ -452,233 +523,117 @@ mod parser {
         )(input)
     }
 
-    fn colon(input: &str) -> IResult<&str, char> {
-        preceded(ms0, char(':'))(input)
-    }
-
-    fn dot(input: &str) -> IResult<&str, char> {
-        preceded(ms0, char('.'))(input)
-    }
-
-    fn all(input: &str) -> IResult<&str, char> {
-        preceded(ms0, char('∀'))(input)
-    }
-
-    fn some(input: &str) -> IResult<&str, char> {
-        preceded(ms0, char('∃'))(input)
-    }
-
-    fn comma(input: &str) -> IResult<&str, char> {
-        preceded(ms0, char(','))(input)
-    }
-
-    fn semi(input: &str) -> IResult<&str, char> {
-        preceded(ms0, char(';'))(input)
-    }
-
-    fn eq(input: &str) -> IResult<&str, char> {
-        preceded(ms0, char('='))(input)
-    }
-
-    fn lcurly(input: &str) -> IResult<&str, char> {
-        preceded(ms0, char('{'))(input)
-    }
-
-    fn rcurly(input: &str) -> IResult<&str, char> {
-        preceded(ms0, char('}'))(input)
-    }
-
-    fn lparen(input: &str) -> IResult<&str, char> {
-        preceded(ms0, char('('))(input)
-    }
-
-    fn rparen(input: &str) -> IResult<&str, char> {
-        preceded(ms0, char(')'))(input)
-    }
-
-    fn lsquare(input: &str) -> IResult<&str, char> {
-        preceded(ms0, char('['))(input)
-    }
-
-    fn rsquare(input: &str) -> IResult<&str, char> {
-        preceded(ms0, char(']'))(input)
+    fn s(s: &'static str) -> Box<dyn Fn(&str) -> IResult<&str, ()>> {
+        box move |input: &str| map(preceded(ms0, tag(s)), |_| {})(input)
     }
 
     // parsers
-    pub fn term(input: &str) -> IResult<&str, ParseResult<Term>> {
+    pub fn term(input: &str) -> IResult<&str, Term> {
         alt((app_term, lambda_term))(input) // FIXME
     }
 
-    fn lambda_term(input: &str) -> IResult<&str, ParseResult<Term>> {
+    fn lambda_term(input: &str) -> IResult<&str, Term> {
         alt((
             map(
-                tuple((lambda, lcid, colon, ty, dot, term)),
-                |(_, id, _, fty, _, ft)| -> ParseResult<Term> {
-                    box move |ctx| {
-                        let ty = fty(ctx);
-                        ctx.with_name(id.to_string(), |ctx| TmAbs(id.clone(), ty, box ft(ctx)))
-                    }
-                },
+                tuple((lambda, lcid, s(":"), ty, s("."), term)),
+                |(_, id, _, ty, _, t)| TmAbs(id.clone(), ty, box t),
             ),
             map(
-                tuple((lambda, char('_'), colon, ty, dot, term)),
-                |(_, _, _, fty, _, ft)| -> ParseResult<Term> {
-                    box move |ctx| {
-                        let ty = fty(ctx);
-                        ctx.with_name("_".into(), |ctx| TmAbs("_".into(), ty, box ft(ctx)))
-                    }
-                },
+                tuple((lambda, s("_"), s(":"), ty, s("."), term)),
+                |(_, _, _, ty, _, t)| TmAbs("_".into(), ty, box t),
             ),
-            map(
-                tuple((lambda, ucid, dot, term)),
-                |(_, id, _, ft)| -> ParseResult<Term> {
-                    box move |ctx| {
-                        ctx.with_name(id.to_string(), |ctx| TmTAbs(id.clone(), box ft(ctx)))
-                    }
-                },
-            ),
+            map(tuple((lambda, ucid, s("."), term)), |(_, id, _, t)| {
+                TmTAbs(id, box t)
+            }),
         ))(input)
     }
 
-    fn app_term(input: &str) -> IResult<&str, ParseResult<Term>> {
+    fn app_term(input: &str) -> IResult<&str, Term> {
         map(
             pair(app_term_head, separated_list(ms1, app_term_rest)),
-            |(head, tail)| -> ParseResult<Term> {
-                box move |ctx| tail.iter().fold(head(ctx), |t, f| f(ctx, t))
-            },
+            |(head, tail)| tail.iter().fold(head, |t, f| f(t)),
         )(input)
     }
 
-    fn app_term_head(input: &str) -> IResult<&str, ParseResult<Term>> {
+    fn app_term_head(input: &str) -> IResult<&str, Term> {
         atomic_term(input)
     }
 
-    fn app_term_rest(input: &str) -> IResult<&str, Box<dyn Fn(&mut Context, Term) -> Term>> {
+    fn app_term_rest(input: &str) -> IResult<&str, Box<dyn Fn(Term) -> Term>> {
         alt((
+            map(atomic_term, |t1| -> Box<dyn Fn(Term) -> Term> {
+                box move |t2| TmApp(box t2, box t1.clone())
+            }),
             map(
-                atomic_term,
-                |f| -> Box<dyn Fn(&mut Context, Term) -> Term> {
-                    box move |ctx, t| TmApp(box t, box f(ctx))
-                },
-            ),
-            map(
-                delimited(lsquare, ty, rsquare),
-                |fty| -> Box<dyn Fn(&mut Context, Term) -> Term> {
-                    box move |ctx, t| TmTApp(box t, fty(ctx))
-                },
+                delimited(s("["), ty, s("]")),
+                |ty| -> Box<dyn Fn(Term) -> Term> { box move |t| TmTApp(box t, ty.clone()) },
             ),
         ))(input)
     }
 
-    fn atomic_term(input: &str) -> IResult<&str, ParseResult<Term>> {
-        preceded(
-            ms0,
-            alt((
-                delimited(lparen, term, rparen),
-                map(lcid, |id| -> ParseResult<_> {
-                    box move |ctx| TmVar(ctx.name2index(&id).expect(&format!("{} not found", id)))
-                }),
-            )),
-        )(input)
+    fn atomic_term(input: &str) -> IResult<&str, Term> {
+        alt((
+            delimited(s("("), term, s(")")),
+            map(lcid, |id| TmVar(id, 0)),
+        ))(input)
     }
 
-    fn ty(input: &str) -> IResult<&str, ParseResult<Ty>> {
+    fn ty(input: &str) -> IResult<&str, Ty> {
         alt((
             arrow_type,
-            map(
-                tuple((all, ucid, dot, ty)),
-                |(_, id, _, fty)| -> ParseResult<Ty> {
-                    box move |ctx| {
-                        ctx.with_name(id.to_string(), |ctx| TyAll(id.clone(), box fty(ctx)))
-                    }
-                },
-            ),
+            map(tuple((s("∀"), ucid, s("."), ty)), |(_, id, _, t)| {
+                TyAll(id, box t)
+            }),
         ))(input)
     }
 
-    fn arrow_type(input: &str) -> IResult<&str, ParseResult<Ty>> {
+    fn arrow_type(input: &str) -> IResult<&str, Ty> {
         alt((
             map(
-                tuple((atomic_type, pair(ms0, tag("->")), arrow_type)),
-                |(f1, _, f2)| -> ParseResult<Ty> { box move |ctx| TyArr(box f1(ctx), box f2(ctx)) },
+                tuple((atomic_type, s("->"), arrow_type)),
+                |(ty1, _, ty2)| TyArr(box ty1, box ty2),
             ),
             atomic_type,
         ))(input)
     }
 
-    fn atomic_type(input: &str) -> IResult<&str, ParseResult<Ty>> {
-        preceded(
-            ms0,
-            alt((
-                delimited(lparen, ty, rparen),
-                map(ucid, |id| -> ParseResult<Ty> {
-                    box move |ctx| {
-                        if ctx.is_name_bound(&id) {
-                            TyVar(ctx.name2index(&id).unwrap()) // TODO
-                        } else {
-                            panic!("NO {} Type!", id); // TODO
-                        }
-                    }
-                }),
-                map(
-                    tuple((pair(lcurly, some), ucid, comma, ty, rcurly)),
-                    |(_, id, _, fty, _)| -> ParseResult<Ty> {
-                        box move |ctx| {
-                            ctx.with_name(id.to_string(), |ctx| TySome(id.clone(), box fty(ctx)))
-                        }
-                    },
-                ),
-            )),
-        )(input)
-    }
-
-    fn binder(input: &str) -> IResult<&str, ParseResult<Binding>> {
+    fn atomic_type(input: &str) -> IResult<&str, Ty> {
         alt((
-            map(preceded(colon, ty), |fty| -> ParseResult<_> {
-                box move |ctx| VarBind(fty(ctx))
-            }),
-            map(preceded(eq, term), |ft| -> ParseResult<_> {
-                box move |ctx| TmAbbBind(ft(ctx), None)
-            }),
+            delimited(s("("), ty, s(")")),
+            map(ucid, |id| TyVar(id.into(), 0)),
+            map(
+                tuple((s("{"), s("∃"), ucid, s(","), ty, s("}"))),
+                |(_, _, id, _, t, _)| TySome(id.into(), box t),
+            ),
         ))(input)
     }
 
-    fn ty_binder(input: &str) -> IResult<&str, ParseResult<Binding>> {
-        map(preceded(eq, ty), |fty| -> ParseResult<_> {
-            box move |ctx| TyAbbBind(fty(ctx))
-        })(input)
+    fn binder(input: &str) -> IResult<&str, Binding> {
+        alt((
+            map(preceded(s(":"), ty), |ty| VarBind(ty)),
+            map(preceded(s("="), term), |t| TmAbbBind(t, None)),
+        ))(input)
     }
 
-    fn command(input: &str) -> IResult<&str, ParseResult<Command>> {
+    fn ty_binder(input: &str) -> IResult<&str, Binding> {
+        map(preceded(s("="), ty), |ty| TyAbbBind(ty))(input)
+    }
+
+    fn command(input: &str) -> IResult<&str, Command> {
         alt((
-            map(pair(ucid, ty_binder), |(id, fb)| -> ParseResult<_> {
-                box move |ctx| {
-                    let result = Bind(id.clone(), fb(ctx));
-                    ctx.add_name(id.to_string());
-                    result
-                }
-            }),
-            map(pair(lcid, binder), |(id, fb)| -> ParseResult<_> {
-                box move |ctx| {
-                    let result = Bind(id.clone(), fb(ctx));
-                    ctx.add_name(id.to_string());
-                    result
-                }
-            }),
-            map(term, |ft| -> ParseResult<_> {
-                box move |ctx| Eval(ft(ctx))
-            }),
+            map(pair(ucid, ty_binder), |(id, b)| Bind(id, b)),
+            map(pair(lcid, binder), |(id, b)| Bind(id, b)),
+            map(term, |t| Eval(t)),
         ))(input)
     }
 
     pub fn parse(input: &str) -> IResult<&str, Vec<Command>> {
+        let (input, mut commands) = separated_list(s(";"), command)(input)?;
         let mut ctx = Context::new();
-        let (input, fs) = separated_list(semi, command)(input)?;
-        let mut result = vec![];
-        for f in fs {
-            result.push(f(&mut ctx));
+        for cmd in &mut commands {
+            cmd.fix(&mut ctx);
         }
-        Ok((input, result))
+        Ok((input, commands))
     }
 }
 
@@ -698,6 +653,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         and tru fls [CBool];
 
         id = λX. λx:X. x;
+        not;
         id [CBool] tru;
         ",
     )
@@ -714,7 +670,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Eval(t) => {
                 let t = t.eval(&ctx);
                 let ty = t.ty(&mut ctx);
-                println!("{:?}: {}", t, ty.display(&ctx));
+                println!("{:?}: {}", t, ty);
             }
             Bind(x, bind) => {
                 let bind = bind.eval(&ctx);
