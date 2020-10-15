@@ -292,6 +292,44 @@ impl Term {
             }
         }
     }
+
+    fn format(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TmAbs(x, tyt1, t2) => write!(f, "λ{}:{}. {}", x, tyt1, t2),
+            TmUnpack(tyx, x, t1, t2) => write!(f, "let {{{}, {}}} = {} in {}", tyx, x, t1, t2),
+            TmTAbs(x, t) => write!(f, "λ{}. {}", x, t),
+            _ => self.format_app(f),
+        }
+    }
+
+    fn format_app(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TmApp(t1, t2) => {
+                t1.format_app(f)?;
+                write!(f, " ")?;
+                t2.format_atomic(f)
+            }
+            TmTApp(t, ty) => {
+                t.format_app(f)?;
+                write!(f, " [{}]", ty)
+            }
+            _ => self.format_atomic(f),
+        }
+    }
+
+    fn format_atomic(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TmVar(x, _) => write!(f, "{}", x),
+            TmPack(tyt1, t2, tyt3) => write!(f, "{{∃{}, {}}} as {}", tyt1, t2, tyt3),
+            _ => write!(f, "({})", self),
+        }
+    }
+}
+
+impl fmt::Display for Term {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.format(f)
+    }
 }
 
 impl Ty {
@@ -380,10 +418,7 @@ impl Ty {
 
     fn format(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TyAll(tyx, tyt2) => {
-                write!(f, "∀{}. ", tyx)?;
-                tyt2.format(f)
-            }
+            TyAll(tyx, tyt2) => write!(f, "∀{}. {}", tyx, tyt2),
             _ => self.format_arrow(f),
         }
     }
@@ -391,9 +426,9 @@ impl Ty {
     fn format_arrow(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TyArr(tyt1, tyt2) => {
-                tyt1.format(f)?;
+                tyt1.format_atomic(f)?;
                 write!(f, " -> ")?;
-                tyt2.format(f)
+                tyt2.format_arrow(f)
             }
             _ => self.format_atomic(f),
         }
@@ -402,16 +437,8 @@ impl Ty {
     fn format_atomic(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TyVar(s, _) => write!(f, "{}", s),
-            TySome(tyx, tyt2) => {
-                write!(f, "{{∃{}, ", tyx)?;
-                tyt2.format(f)?;
-                write!(f, "}}")
-            }
-            _ => {
-                write!(f, "(")?;
-                self.format(f)?;
-                write!(f, ")")
-            }
+            TySome(tyx, tyt2) => write!(f, "{{∃{}, {}}}", tyx, tyt2),
+            _ => write!(f, "({})", self),
         }
     }
 }
@@ -456,6 +483,19 @@ impl Binding {
     }
 }
 
+impl fmt::Display for Binding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NameBind => Ok(()),
+            TyVarBind => Ok(()),
+            TyAbbBind(ty) => write!(f, " = {}", ty),
+            VarBind(ty) => write!(f, ": {}", ty),
+            TmAbbBind(t, None) => write!(f, " = {}", t),
+            TmAbbBind(t, Some(ty)) => write!(f, " = {}; {}", t, ty),
+        }
+    }
+}
+
 impl Command {
     fn fix(&mut self, ctx: &mut Context) {
         match self {
@@ -469,6 +509,16 @@ impl Command {
                 ctx.add_name(s1.to_string());
                 ctx.add_name(s2.to_string());
             }
+        }
+    }
+}
+
+impl fmt::Display for Command {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Eval(t) => t.fmt(f),
+            Bind(x, b) => write!(f, "{}{}", x, b),
+            SomeBind(_, _, _) => Ok(()), // TODO
         }
     }
 }
@@ -642,7 +692,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         id = λX. λx:X. x;
         not;
-        id [CBool] tru;
+        id [CBool] not;
+
+        CNat = ∀X. (X -> X) -> X -> X;
+        c0 = λX. λs:X->X. λz:X. z;
+        c1 = λX. λs:X->X. λz:X. s z;
+        c2 = λX. λs:X->X. λz:X. s (s z);
+
+        csucc = λn:CNat. λX. λs:X->X. λz:X. s (n [X] s z);
+        csucc c0;
         ",
     )
     .unwrap();
@@ -652,17 +710,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // eval loop
     let mut ctx = Context::new();
     for cmd in cmds {
-        println!("> {:?}", cmd);
+        println!("> {}", cmd);
 
         match cmd {
             Eval(t) => {
                 let t = t.eval(&ctx);
                 let ty = t.ty(&mut ctx);
-                println!("{:?}: {}", t, ty);
+                println!("{}: {}", t, ty);
             }
             Bind(x, bind) => {
                 let bind = bind.eval(&ctx);
-                println!("{:?}", bind);
+                println!("{}{}", x, bind);
                 ctx.add_binding(x.to_string(), bind);
             }
             _ => panic!("Invalid Command: {:?}", cmd),
