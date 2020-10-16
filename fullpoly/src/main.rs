@@ -21,7 +21,7 @@ pub enum Ty {
     TySome(Rc<str>, Box<Ty>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Term {
     TmVar(Rc<str>, usize),
     TmAbs(Rc<str>, Ty, Box<Term>),
@@ -867,11 +867,34 @@ mod parser {
 
     // tokens
     const ID_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
+    const KEYWORDS: &[&str] = &[
+        "lambda",
+        "λ",
+        "let",
+        "letrec",
+        "fix",
+        "succ",
+        "pred",
+        "iszero",
+        "timesfloat",
+        "inert",
+        "unit",
+        "true",
+        "false",
+        "if",
+        "then",
+        "else",
+        "in",
+        "as",
+    ];
 
     fn id(input: &str) -> IResult<&str, Rc<str>> {
-        map(
-            preceded(ms0, recognize(many1(one_of(ID_CHARS)))),
-            |s: &str| s.into(),
+        verify(
+            map(
+                preceded(ms0, recognize(many1(one_of(ID_CHARS)))),
+                |s: &str| s.into(),
+            ),
+            |id: &str| !KEYWORDS.contains(&id),
         )(input)
     }
 
@@ -891,8 +914,6 @@ mod parser {
     }
 
     fn s(s: &'static str) -> Box<dyn Fn(&str) -> IResult<&str, ()>> {
-        // let s = s.to_string();
-        // box move |input: &str| map(preceded(ms0, tag(&s[..])), |_| {})(input)
         box move |input: &str| map(preceded(ms0, tag(s)), |_| {})(input)
     }
 
@@ -977,7 +998,7 @@ mod parser {
     }
 
     fn term(input: &str) -> IResult<&str, Term> {
-        alt((app_term, lambda_term, if_term, let_term))(input)
+        alt((lambda_term, if_term, let_term, app_term))(input)
     }
 
     fn lambda_term(input: &str) -> IResult<&str, Term> {
@@ -1126,34 +1147,24 @@ mod parser {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let code = "
-        CBool = ∀X. X -> X -> X;
-        tru = λX. λt:X. λf:X. t;
-        fls = λX. λt:X. λf:X. f;
+    let code = r###"
+    "hello";
+    unit;
+    let x = true in x;
+    timesfloat 2.0 3.14159;
+    λx:Bool. x;
 
-        not = λb:CBool. λX. λt:X. λf:X. b [X] f t;
-        not tru [CBool] tru fls;
+    id = λX. λx:X. x;
+    id [Bool] true;
+    id [Nat] 10;
 
-        and = λb:CBool. λc:CBool. λX. λt:X. λf:X. b [X] (c [X] t f) f;
-        and tru tru [CBool] tru fls;
-        and tru fls [CBool] tru fls;
-        and tru fls [CBool];
+    double = λX. λf:X->X. λa:X. f (f a);
+    double [Nat] (id [Nat]) 0;
+    double [Nat] (λx:Nat. succ x) 0;
 
-        id = λX. λx:X. x;
-        not;
-        id [CBool] not;
-
-        CNat = ∀X. (X -> X) -> X -> X;
-        c0 = λX. λs:X->X. λz:X. z;
-        c1 = λX. λs:X->X. λz:X. s z;
-        c2 = λX. λs:X->X. λz:X. s (s z);
-
-        csucc = λn:CNat. λX. λs:X->X. λz:X. s (n [X] s z);
-        csucc c0;
-        3;
-        succ 3;
-        id [Nat] 5;
-    ";
+    quadruple = λX. double [X->X] (double [X]);
+    quadruple [Nat] (λx:Nat. succ x) 0;
+    "###;
     let (_, cmds) = parser::parse(code)?;
 
     // eval loop
