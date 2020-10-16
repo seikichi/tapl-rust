@@ -1,14 +1,21 @@
 #![feature(box_syntax, box_patterns)]
 
-use std::env;
+// use std::env;
 use std::fmt;
-use std::fs;
+// use std::fs;
 use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ty {
     TyVar(Rc<str>, usize),
+    TyId(Rc<str>),
     TyArr(Box<Ty>, Box<Ty>),
+    TyString,
+    TyUnit,
+    TyRecord(Vec<(Rc<str>, Ty)>),
+    TyBool,
+    TyFloat,
+    TyNat,
     TyAll(Rc<str>, Box<Ty>),
     TySome(Rc<str>, Box<Ty>),
 }
@@ -18,17 +25,34 @@ pub enum Term {
     TmVar(Rc<str>, usize),
     TmAbs(Rc<str>, Ty, Box<Term>),
     TmApp(Box<Term>, Box<Term>),
-    TmTAbs(Rc<str>, Box<Term>),
-    TmTApp(Box<Term>, Ty),
+    TmLet(Rc<str>, Box<Term>, Box<Term>),
+    TmFix(Box<Term>),
+    TmString(Rc<str>),
+    TmUnit,
+    TmAscribe(Box<Term>, Ty),
+    TmRecord(Vec<(Rc<str>, Term)>),
+    TmProj(Box<Term>, Rc<str>),
+    TmTrue,
+    TmFalse,
+    TmIf(Box<Term>, Box<Term>, Box<Term>),
+    TmFloat(f64),
+    TmTimesfloat(Box<Term>, Box<Term>),
+    TmZero,
+    TmSucc(Box<Term>),
+    TmPred(Box<Term>),
+    TmIsZero(Box<Term>),
+    TmInert(Ty),
     TmPack(Ty, Box<Term>, Ty),
     TmUnpack(Rc<str>, Rc<str>, Box<Term>, Box<Term>),
+    TmTAbs(Rc<str>, Box<Term>),
+    TmTApp(Box<Term>, Ty),
 }
 
 #[derive(Clone, Debug)]
 pub enum Binding {
     NameBind,
-    VarBind(Ty),
     TyVarBind,
+    VarBind(Ty),
     TyAbbBind(Ty),
     TmAbbBind(Term, Option<Ty>),
 }
@@ -74,15 +98,6 @@ impl Context {
         self.with_binding(x, NameBind, f)
     }
 
-    fn index2name(&self, x: usize) -> Option<&String> {
-        if self.bindings.len() <= x {
-            return None;
-        }
-        self.bindings
-            .get(self.bindings.len() - x - 1)
-            .map(|(s, _)| s)
-    }
-
     fn name2index(&self, x: &str) -> Option<usize> {
         self.bindings.iter().rev().position(|(y, _)| y == x)
     }
@@ -113,10 +128,6 @@ impl Context {
             _ => panic!("No TyAbbBind"),
         }
     }
-
-    fn is_name_bound(&self, x: &str) -> bool {
-        self.bindings.iter().any(|(s, _)| s == x)
-    }
 }
 
 impl Term {
@@ -127,11 +138,29 @@ impl Term {
         ontype: TF,
     ) -> Self {
         match &self {
+            TmInert(tyt) => TmInert(ontype(c, tyt)),
             TmVar(n, x) => onvar(c, n.clone(), *x),
             TmAbs(x, ty1, t2) => TmAbs(x.clone(), ontype(c, ty1), box t2.map(c + 1, onvar, ontype)),
             TmApp(t1, t2) => TmApp(box t1.map(c, onvar, ontype), box t2.map(c, onvar, ontype)),
-            TmTAbs(tyx, t2) => TmTAbs(tyx.clone(), box t2.map(c + 1, onvar, ontype)),
-            TmTApp(t1, ty2) => TmTApp(box t1.map(c, onvar, ontype), ontype(c, ty2)),
+            TmLet(x, t1, t2) => TmLet(
+                x.clone(),
+                box t1.map(c, onvar, ontype),
+                box t2.map(c + 1, onvar, ontype),
+            ),
+            TmFix(t1) => TmFix(box t1.map(c, onvar, ontype)),
+            TmString(_) | TmUnit | TmTrue | TmFalse | TmFloat(_) | TmZero => self.clone(),
+            TmIf(t1, t2, t3) => TmIf(
+                box t1.map(c, onvar, ontype),
+                box t2.map(c, onvar, ontype),
+                box t3.map(c, onvar, ontype),
+            ),
+            TmAscribe(t1, tyt1) => TmAscribe(box t1.map(c, onvar, ontype), ontype(c, tyt1)),
+            TmTimesfloat(t1, t2) => {
+                TmTimesfloat(box t1.map(c, onvar, ontype), box t2.map(c, onvar, ontype))
+            }
+            TmSucc(t1) => TmSucc(box t1.map(c, onvar, ontype)),
+            TmPred(t1) => TmPred(box t1.map(c, onvar, ontype)),
+            TmIsZero(t1) => TmIsZero(box t1.map(c, onvar, ontype)),
             TmPack(ty1, t2, ty3) => {
                 TmPack(ontype(c, ty1), box t2.map(c, onvar, ontype), ontype(c, ty3))
             }
@@ -140,6 +169,15 @@ impl Term {
                 x.clone(),
                 box t1.map(c, onvar, ontype),
                 box t2.map(c + 2, onvar, ontype),
+            ),
+            TmTAbs(tyx, t2) => TmTAbs(tyx.clone(), box t2.map(c + 1, onvar, ontype)),
+            TmTApp(t1, ty2) => TmTApp(box t1.map(c, onvar, ontype), ontype(c, ty2)),
+            TmProj(t, l) => TmProj(box t.map(c, onvar, ontype), l.clone()),
+            TmRecord(fields) => TmRecord(
+                fields
+                    .iter()
+                    .map(|(li, ti)| (li.clone(), ti.map(c, onvar, ontype)))
+                    .collect(),
             ),
         }
     }
@@ -270,11 +308,22 @@ impl Term {
                 ty.fix(ctx);
                 ctx.with_name(s.to_string(), |ctx| t.fix(ctx))
             }
+            TmLet(s, t1, t2) => {
+                t1.fix(ctx);
+                ctx.with_name(s.to_string(), |ctx| t2.fix(ctx))
+            }
+            TmTAbs(s, t) => ctx.with_name(s.to_string(), |ctx| t.fix(ctx)),
+            TmUnpack(s1, s2, t1, t2) => {
+                t1.fix(ctx);
+                ctx.with_name(s1.to_string(), |ctx| {
+                    ctx.with_name(s2.to_string(), |ctx| t2.fix(ctx))
+                })
+            }
+
             TmApp(t1, t2) => {
                 t1.fix(ctx);
                 t2.fix(ctx)
             }
-            TmTAbs(s, t) => ctx.with_name(s.to_string(), |ctx| t.fix(ctx)),
             TmTApp(t, ty) => {
                 t.fix(ctx);
                 ty.fix(ctx)
@@ -284,12 +333,27 @@ impl Term {
                 t2.fix(ctx);
                 ty3.fix(ctx);
             }
-            TmUnpack(s1, s2, t1, t2) => {
-                t1.fix(ctx);
-                ctx.with_name(s1.to_string(), |ctx| {
-                    ctx.with_name(s2.to_string(), |ctx| t2.fix(ctx))
-                })
+            TmFix(t) => t.fix(ctx),
+            TmAscribe(t, ty) => {
+                t.fix(ctx);
+                ty.fix(ctx);
             }
+            TmProj(t, _) => t.fix(ctx),
+            TmSucc(t) => t.fix(ctx),
+            TmPred(t) => t.fix(ctx),
+            TmIsZero(t) => t.fix(ctx),
+            TmInert(ty) => ty.fix(ctx),
+            TmIf(t1, t2, t3) => {
+                t1.fix(ctx);
+                t2.fix(ctx);
+                t3.fix(ctx)
+            }
+            TmTimesfloat(t1, t2) => {
+                t1.fix(ctx);
+                t2.fix(ctx)
+            }
+            TmRecord(fields) => fields.into_iter().for_each(|(_, ti)| ti.fix(ctx)),
+            TmUnit | TmString(_) | TmTrue | TmFalse | TmFloat(_) | TmZero => {}
         }
     }
 
@@ -336,9 +400,16 @@ impl Ty {
     fn map<F: Copy + Fn(i32, Rc<str>, usize) -> Self>(&self, c: i32, onvar: F) -> Self {
         match &self {
             TyVar(s, x) => onvar(c, s.clone(), *x),
+            TyId(_) | TyString | TyUnit | TyFloat | TyBool | TyNat => self.clone(),
             TyArr(ty1, ty2) => TyArr(box ty1.map(c, onvar), box ty2.map(c, onvar)),
             TyAll(tyx, ty2) => TyAll(tyx.clone(), box ty2.map(c + 1, onvar)),
             TySome(tyx, ty2) => TySome(tyx.clone(), box ty2.map(c + 1, onvar)),
+            TyRecord(fieldtys) => TyRecord(
+                fieldtys
+                    .iter()
+                    .map(|(li, tyti)| (li.clone(), tyti.map(c, onvar)))
+                    .collect(),
+            ),
         }
     }
 
@@ -407,12 +478,15 @@ impl Ty {
     fn fix(&mut self, ctx: &mut Context) {
         match self {
             TyVar(s, n) => *n = ctx.name2index(s).unwrap(),
+            TyAll(s, ty) => ctx.with_name(s.to_string(), |ctx| ty.fix(ctx)),
+            TySome(s, ty) => ctx.with_name(s.to_string(), |ctx| ty.fix(ctx)),
+
             TyArr(ty1, ty2) => {
                 ty1.fix(ctx);
                 ty2.fix(ctx);
             }
-            TyAll(s, ty) => ctx.with_name(s.to_string(), |ctx| ty.fix(ctx)),
-            TySome(s, ty) => ctx.with_name(s.to_string(), |ctx| ty.fix(ctx)),
+            TyRecord(fieldtys) => fieldtys.into_iter().for_each(|(_, tyi)| tyi.fix(ctx)),
+            TyId(_) | TyString | TyUnit | TyBool | TyFloat | TyNat => {}
         }
     }
 
@@ -574,7 +648,7 @@ mod parser {
         alt((
             map(
                 tuple((lambda, lcid, s(":"), ty, s("."), term)),
-                |(_, id, _, ty, _, t)| TmAbs(id.clone(), ty, box t),
+                |(_, id, _, ty, _, t)| TmAbs(id, ty, box t),
             ),
             map(
                 tuple((lambda, s("_"), s(":"), ty, s("."), term)),
@@ -638,10 +712,10 @@ mod parser {
     fn atomic_type(input: &str) -> IResult<&str, Ty> {
         alt((
             delimited(s("("), ty, s(")")),
-            map(ucid, |id| TyVar(id.into(), 0)),
+            map(ucid, |id| TyVar(id, 0)),
             map(
                 tuple((s("{"), s("∃"), ucid, s(","), ty, s("}"))),
-                |(_, _, id, _, t, _)| TySome(id.into(), box t),
+                |(_, _, id, _, t, _)| TySome(id, box t),
             ),
         ))(input)
     }
