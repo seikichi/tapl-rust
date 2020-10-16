@@ -35,7 +35,7 @@ pub enum Term {
     TmTrue,
     TmFalse,
     TmIf(Box<Term>, Box<Term>, Box<Term>),
-    TmFloat(f64),
+    TmFloat(f32),
     TmTimesfloat(Box<Term>, Box<Term>),
     TmZero,
     TmSucc(Box<Term>),
@@ -689,10 +689,13 @@ mod parser {
     use nom::{
         branch::alt,
         bytes::complete::tag,
-        character::complete::{char, multispace0 as ms0, multispace1 as ms1, one_of},
-        combinator::{map, recognize, verify},
-        multi::{many1, separated_list},
-        sequence::{delimited, pair, preceded, tuple},
+        character::complete::{
+            char, digit1, multispace0 as ms0, multispace1 as ms1, none_of, one_of,
+        },
+        combinator::{all_consuming, map, opt, recognize, verify},
+        multi::{many0, many1, separated_list},
+        number::complete::recognize_float,
+        sequence::{delimited, pair, preceded, terminated, tuple},
         IResult,
     };
 
@@ -722,58 +725,46 @@ mod parser {
     }
 
     fn s(s: &'static str) -> Box<dyn Fn(&str) -> IResult<&str, ()>> {
+        // let s = s.to_string();
+        // box move |input: &str| map(preceded(ms0, tag(&s[..])), |_| {})(input)
         box move |input: &str| map(preceded(ms0, tag(s)), |_| {})(input)
     }
 
     // parsers
-    pub fn term(input: &str) -> IResult<&str, Term> {
-        alt((app_term, lambda_term))(input) // FIXME
+    pub fn parse(input: &str) -> IResult<&str, Vec<Command>> {
+        let (input, mut commands) = all_consuming(terminated(
+            separated_list(s(";"), command),
+            pair(opt(s(";")), ms0),
+        ))(input)?;
+
+        let mut ctx = Context::new();
+        for cmd in &mut commands {
+            cmd.fix(&mut ctx);
+        }
+        Ok((input, commands))
     }
 
-    fn lambda_term(input: &str) -> IResult<&str, Term> {
+    fn command(input: &str) -> IResult<&str, Command> {
         alt((
+            map(pair(ucid, ty_binder), |(id, b)| Bind(id, b)),
+            map(pair(lcid, binder), |(id, b)| Bind(id, b)),
             map(
-                tuple((lambda, lcid, s(":"), ty, s("."), term)),
-                |(_, id, _, ty, _, t)| TmAbs(id, ty, box t),
+                tuple((s("{"), ucid, s(","), lcid, s("}"), s("="), term)),
+                |(_, uid, _, lid, _, _, t)| SomeBind(uid, lid, t),
             ),
-            map(
-                tuple((lambda, s("_"), s(":"), ty, s("."), term)),
-                |(_, _, _, ty, _, t)| TmAbs("_".into(), ty, box t),
-            ),
-            map(tuple((lambda, ucid, s("."), term)), |(_, id, _, t)| {
-                TmTAbs(id, box t)
-            }),
+            map(term, |t| Eval(t)),
         ))(input)
     }
 
-    fn app_term(input: &str) -> IResult<&str, Term> {
-        map(
-            pair(app_term_head, separated_list(ms1, app_term_rest)),
-            |(head, tail)| tail.iter().fold(head, |t, f| f(t)),
-        )(input)
-    }
-
-    fn app_term_head(input: &str) -> IResult<&str, Term> {
-        atomic_term(input)
-    }
-
-    fn app_term_rest(input: &str) -> IResult<&str, Box<dyn Fn(Term) -> Term>> {
+    fn binder(input: &str) -> IResult<&str, Binding> {
         alt((
-            map(atomic_term, |t1| -> Box<dyn Fn(Term) -> Term> {
-                box move |t2| TmApp(box t2, box t1.clone())
-            }),
-            map(
-                delimited(s("["), ty, s("]")),
-                |ty| -> Box<dyn Fn(Term) -> Term> { box move |t| TmTApp(box t, ty.clone()) },
-            ),
+            map(preceded(s(":"), ty), |ty| VarBind(ty)),
+            map(preceded(s("="), term), |t| TmAbbBind(t, None)),
         ))(input)
     }
 
-    fn atomic_term(input: &str) -> IResult<&str, Term> {
-        alt((
-            delimited(s("("), term, s(")")),
-            map(lcid, |id| TmVar(id, 0)),
-        ))(input)
+    fn ty_binder(input: &str) -> IResult<&str, Binding> {
+        map(preceded(s("="), ty), |ty| TyAbbBind(ty))(input)
     }
 
     fn ty(input: &str) -> IResult<&str, Ty> {
@@ -798,7 +789,16 @@ mod parser {
     fn atomic_type(input: &str) -> IResult<&str, Ty> {
         alt((
             delimited(s("("), ty, s(")")),
+            map(s("String"), |_| TyString),
+            map(s("Unit"), |_| TyUnit),
+            map(s("Bool"), |_| TyBool),
+            map(s("Nat"), |_| TyNat),
+            map(s("Float"), |_| TyFloat),
             map(ucid, |id| TyVar(id, 0)),
+            map(
+                delimited(s("{"), separated_list(s(","), field_type_element), s("}")),
+                |fs| TyRecord(fs),
+            ),
             map(
                 tuple((s("{"), s("∃"), ucid, s(","), ty, s("}"))),
                 |(_, _, id, _, t, _)| TySome(id, box t),
@@ -806,38 +806,161 @@ mod parser {
         ))(input)
     }
 
-    fn binder(input: &str) -> IResult<&str, Binding> {
+    fn field_type_element(input: &str) -> IResult<&str, (Rc<str>, Ty)> {
+        map(tuple((lcid, s(":"), ty)), |(id, _, ty)| (id, ty))(input)
+    }
+
+    fn term(input: &str) -> IResult<&str, Term> {
+        alt((app_term, lambda_term, if_term, let_term))(input)
+    }
+
+    fn lambda_term(input: &str) -> IResult<&str, Term> {
         alt((
-            map(preceded(s(":"), ty), |ty| VarBind(ty)),
-            map(preceded(s("="), term), |t| TmAbbBind(t, None)),
+            map(
+                tuple((lambda, lcid, s(":"), ty, s("."), term)),
+                |(_, id, _, ty, _, t)| TmAbs(id, ty, box t),
+            ),
+            map(
+                tuple((lambda, s("_"), s(":"), ty, s("."), term)),
+                |(_, _, _, ty, _, t)| TmAbs("_".into(), ty, box t),
+            ),
+            map(tuple((lambda, ucid, s("."), term)), |(_, id, _, t)| {
+                TmTAbs(id, box t)
+            }),
         ))(input)
     }
 
-    fn ty_binder(input: &str) -> IResult<&str, Binding> {
-        map(preceded(s("="), ty), |ty| TyAbbBind(ty))(input)
+    fn if_term(input: &str) -> IResult<&str, Term> {
+        map(
+            tuple((s("if"), term, s("then"), term, s("else"), term)),
+            |(_, t1, _, t2, _, t3)| TmIf(box t1, box t2, box t3),
+        )(input)
     }
 
-    fn command(input: &str) -> IResult<&str, Command> {
+    fn let_term(input: &str) -> IResult<&str, Term> {
         alt((
-            map(pair(ucid, ty_binder), |(id, b)| Bind(id, b)),
-            map(pair(lcid, binder), |(id, b)| Bind(id, b)),
-            map(term, |t| Eval(t)),
+            map(
+                tuple((s("let"), lcid, s("="), term, s("in"), term)),
+                |(_, id, _, t1, _, t2)| TmLet(id, box t1, box t2),
+            ),
+            map(
+                tuple((s("let"), s("_"), s("="), term, s("in"), term)),
+                |(_, _, _, t1, _, t2)| TmLet("_".into(), box t1, box t2),
+            ),
+            map(
+                tuple((s("letrec"), lcid, s(":"), ty, s("="), term, s("in"), term)),
+                |(_, id, _, ty, _, t1, _, t2)| {
+                    TmLet(id.clone(), box TmFix(box TmAbs(id, ty, box t1)), box t2)
+                },
+            ),
         ))(input)
     }
 
-    pub fn parse(input: &str) -> IResult<&str, Vec<Command>> {
-        let (input, mut commands) = separated_list(s(";"), command)(input)?;
-        let mut ctx = Context::new();
-        for cmd in &mut commands {
-            cmd.fix(&mut ctx);
-        }
-        Ok((input, commands))
+    fn app_term(input: &str) -> IResult<&str, Term> {
+        map(
+            pair(app_term_head, separated_list(ms1, app_term_rest)),
+            |(head, tail)| tail.iter().fold(head, |t, f| f(t)),
+        )(input)
+    }
+
+    fn app_term_head(input: &str) -> IResult<&str, Term> {
+        alt((
+            map(tuple((s("fix"), ms1, path_term)), |(_, _, t)| TmFix(box t)),
+            map(
+                tuple((s("timesfloat"), ms1, path_term, path_term)),
+                |(_, _, t1, t2)| TmTimesfloat(box t1, box t2),
+            ),
+            map(tuple((s("succ"), ms1, path_term)), |(_, _, t)| {
+                TmSucc(box t)
+            }),
+            map(tuple((s("pred"), ms1, path_term)), |(_, _, t)| {
+                TmPred(box t)
+            }),
+            map(tuple((s("iszero"), ms1, path_term)), |(_, _, t)| {
+                TmIsZero(box t)
+            }),
+            path_term,
+        ))(input)
+    }
+
+    fn app_term_rest(input: &str) -> IResult<&str, Box<dyn Fn(Term) -> Term>> {
+        alt((
+            map(
+                delimited(s("["), ty, s("]")),
+                |ty| -> Box<dyn Fn(Term) -> Term> { box move |t| TmTApp(box t, ty.clone()) },
+            ),
+            map(path_term, |t1| -> Box<dyn Fn(Term) -> Term> {
+                box move |t2| TmApp(box t2, box t1.clone())
+            }),
+        ))(input)
+    }
+
+    fn path_term(input: &str) -> IResult<&str, Term> {
+        map(pair(ascribe_term, many0(path_term_rest)), |(head, tail)| {
+            tail.iter().fold(head, |t, f| f(t))
+        })(input)
+    }
+
+    fn path_term_rest(input: &str) -> IResult<&str, Box<dyn Fn(Term) -> Term>> {
+        alt((
+            map(preceded(s("."), lcid), |id| -> Box<dyn Fn(Term) -> Term> {
+                box move |t| TmProj(box t, id.clone())
+            }),
+            map(
+                preceded(s("."), digit1),
+                |id| -> Box<dyn Fn(Term) -> Term> {
+                    let id: Rc<str> = id.into();
+                    box move |t| TmProj(box t, id.clone())
+                },
+            ),
+        ))(input)
+    }
+
+    fn ascribe_term(input: &str) -> IResult<&str, Term> {
+        alt((
+            map(tuple((atomic_term, s("as"), ty)), |(t, _, ty)| {
+                TmAscribe(box t, ty)
+            }),
+            atomic_term,
+        ))(input)
+    }
+
+    fn atomic_term(input: &str) -> IResult<&str, Term> {
+        alt((
+            delimited(s("("), term, s(")")),
+            map(tuple((s("inert"), s("["), ty, s("]"))), |(_, _, ty, _)| {
+                TmInert(ty)
+            }),
+            map(
+                delimited(pair(ms0, char('"')), many0(none_of("\"")), char('"')),
+                |cs| TmString(cs.iter().collect::<String>().into()),
+            ),
+            map(s("unit"), |_| TmUnit),
+            map(delimited(s("{"), many0(field_element), s("}")), |fields| {
+                TmRecord(fields)
+            }),
+            map(s("true"), |_| TmTrue),
+            map(s("false"), |_| TmFalse),
+            map(preceded(ms0, recognize_float), |s: &str| {
+                s.parse::<u64>()
+                    .map(|v| (0..v).fold(TmZero, |n, _| TmSucc(box n)))
+                    .unwrap_or(TmFloat(s.parse().unwrap()))
+            }),
+            map(
+                tuple((s("{"), s("*"), ty, s(","), term, s("}"), s("as"), ty)),
+                |(_, _, ty1, _, t, _, _, ty2)| TmPack(ty1, box t, ty2),
+            ),
+            map(lcid, |id| TmVar(id, 0)),
+        ))(input)
+    }
+
+    fn field_element(input: &str) -> IResult<&str, (Rc<str>, Term)> {
+        map(tuple((lcid, s("="), term)), |(id, _, t)| (id, t))(input)
     }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (_, cmds) = parser::parse(
-        "
+    let code = "
         CBool = ∀X. X -> X -> X;
         tru = λX. λt:X. λf:X. t;
         fls = λX. λt:X. λf:X. f;
@@ -861,11 +984,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         csucc = λn:CNat. λX. λs:X->X. λz:X. s (n [X] s z);
         csucc c0;
-        ",
-    )
-    .unwrap();
-
-    // println!("cmds = {:?}", cmds);
+    ";
+    let (_, cmds) = parser::parse(code)?;
 
     // eval loop
     let mut ctx = Context::new();
