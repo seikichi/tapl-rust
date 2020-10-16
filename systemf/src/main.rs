@@ -1,4 +1,5 @@
 #![feature(box_syntax, box_patterns)]
+#![feature(bindings_after_at)]
 
 // use std::env;
 use std::fmt;
@@ -226,11 +227,26 @@ impl Term {
         self.ty_subst(0, &ty.shift(1)).shift(-1)
     }
 
+    fn is_numeric_val(&self) -> bool {
+        match &self {
+            TmZero => true,
+            TmSucc(t1) => t1.is_numeric_val(),
+            _ => false,
+        }
+    }
+
     fn is_val(&self, ctx: &Context) -> bool {
         match &self {
-            TmAbs(_, _, _) => true,
+            TmString(_)
+            | TmUnit
+            | TmTrue
+            | TmFalse
+            | TmFloat(_)
+            | TmAbs(_, _, _)
+            | TmTAbs(_, _) => true,
+            _ if self.is_numeric_val() => true,
+            TmRecord(fs) => fs.iter().all(|(_, ti)| ti.is_val(ctx)),
             TmPack(_, v1, _) if v1.is_val(ctx) => true,
-            TmTAbs(_, _) => true,
             _ => false,
         }
     }
@@ -241,6 +257,51 @@ impl Term {
             TmApp(box TmAbs(_, _, t12), v2) if v2.is_val(ctx) => t12.subst_top(v2),
             TmApp(v1, t2) if v1.is_val(ctx) => TmApp(v1.clone(), box t2.eval1(ctx)?),
             TmApp(t1, t2) => TmApp(box t1.eval1(ctx)?, t2.clone()),
+            // TmLet
+            TmLet(_, v1, t2) if v1.is_val(ctx) => t2.subst_top(v1),
+            TmLet(x, t1, t2) => TmLet(x.clone(), box t1.eval1(ctx)?, t2.clone()),
+            // TmFix
+            TmFix(box TmAbs(_, _, t12)) => t12.subst_top(self),
+            TmFix(t1) => TmFix(box t1.eval1(ctx)?),
+            // TmAscribe
+            TmAscribe(box v1, _) if v1.is_val(ctx) => v1.clone(),
+            TmAscribe(t1, tyt) => TmAscribe(box t1.eval1(ctx)?, tyt.clone()),
+            // TmRecord
+            TmRecord(fs) => {
+                let mut fs = fs.clone();
+                for (_, ti) in &mut fs {
+                    if ti.is_val(ctx) {
+                        continue;
+                    }
+                    *ti = ti.eval1(ctx)?;
+                    return Some(TmRecord(fs));
+                }
+                return None;
+            }
+            // TmProj
+            TmProj(v @ box TmRecord(fs), l) if v.is_val(ctx) => fs
+                .iter()
+                .find(|(li, _)| li == l)
+                .map(|(_, ti)| ti.clone())?,
+            TmProj(t1, l) => TmProj(box t1.eval1(ctx)?, l.clone()),
+            // TmIf
+            TmIf(box TmTrue, box t2, _) => t2.clone(),
+            TmIf(box TmFalse, _, box t3) => t3.clone(),
+            TmIf(t1, t2, t3) => TmIf(box t1.eval1(ctx)?, t2.clone(), t3.clone()),
+            // TmTimesfloat
+            TmTimesfloat(box TmFloat(f1), box TmFloat(f2)) => TmFloat(f1 * f2),
+            TmTimesfloat(v1 @ box TmFloat(_), t2) => TmTimesfloat(v1.clone(), box t2.eval1(ctx)?),
+            TmTimesfloat(t1, v2 @ box TmFloat(_)) => TmTimesfloat(box t1.eval1(ctx)?, v2.clone()),
+            // TmSucc
+            TmSucc(t1) => TmSucc(box t1.eval1(ctx)?),
+            // TmPred
+            TmPred(box TmZero) => TmZero,
+            TmPred(box TmSucc(box nv1)) if nv1.is_numeric_val() => nv1.clone(),
+            TmPred(t1) => TmPred(box t1.eval1(ctx)?),
+            // TmIsZero
+            TmIsZero(box TmZero) => TmTrue,
+            TmIsZero(box TmSucc(_)) => TmFalse,
+            TmIsZero(t1) => TmIsZero(box t1.eval1(ctx)?),
             // TmUnpack, TmPack
             TmUnpack(_, _, box TmPack(ty11, v12, _), t2) if v12.is_val(ctx) => {
                 v12.shift(1).subst_top(t2).ty_subst_top(ty11)
@@ -272,6 +333,7 @@ impl Term {
 
     fn ty(&self, ctx: &mut Context) -> Ty {
         match self {
+            TmInert(tyt) => tyt.clone(),
             TmVar(_, i) => ctx.get_type(*i),
             TmAbs(x, tyt1, t2) => ctx.with_binding(x.to_string(), VarBind(tyt1.clone()), |ctx| {
                 let tyt2 = t2.ty(ctx);
@@ -286,6 +348,99 @@ impl Term {
                     _ => panic!("arrow type expected"),
                 }
             }
+            TmLet(x, t1, t2) => {
+                let tyt1 = t1.ty(ctx);
+                ctx.with_binding(x.to_string(), VarBind(tyt1), |ctx| t2.ty(ctx).shift(-1))
+            }
+            TmFix(t1) => {
+                let tyt1 = t1.ty(ctx);
+                match tyt1.simplify(ctx) {
+                    TyArr(box tyt11, box tyt12) => {
+                        if !tyt11.eqv(&tyt12, ctx) {
+                            panic!("result of body not compatible with domain");
+                        }
+                        tyt12
+                    }
+                    _ => panic!("arrow type expected"),
+                }
+            }
+            TmString(_) => TyString,
+            TmUnit => TyUnit,
+            TmAscribe(t1, tyt) => {
+                if !t1.ty(ctx).eqv(tyt, ctx) {
+                    panic!("body of as-term does not have the expected type");
+                }
+                tyt.clone()
+            }
+            TmRecord(fs) => TyRecord(fs.iter().map(|(li, ti)| (li.clone(), ti.ty(ctx))).collect()),
+            TmProj(t1, l) => {
+                if let TyRecord(fs) = t1.ty(ctx).simplify(ctx) {
+                    return fs
+                        .iter()
+                        .find(|(li, _)| li == l)
+                        .map(|(_, ti)| ti.clone())
+                        .expect("label not found");
+                }
+                panic!("Expected record type");
+            }
+            TmTrue => TyBool,
+            TmFalse => TyBool,
+            TmIf(t1, t2, t3) => {
+                if !t1.ty(ctx).eqv(&TyBool, ctx) {
+                    panic!("guard of conditional not a boolean");
+                }
+                let tyt2 = t2.ty(ctx);
+                let tyt3 = t3.ty(ctx);
+                if !tyt2.eqv(&tyt3, ctx) {
+                    panic!("arms of conditional have different types");
+                }
+                tyt2
+            }
+            TmFloat(_) => TyFloat,
+            TmTimesfloat(t1, t2) => {
+                if !t1.ty(ctx).eqv(&TyFloat, ctx) || !t2.ty(ctx).eqv(&TyFloat, ctx) {
+                    panic!("argument of timesfloat is not anumber");
+                }
+                TyFloat
+            }
+            TmZero => TyNat,
+            TmSucc(t1) => {
+                if !t1.ty(ctx).eqv(&TyNat, ctx) {
+                    panic!("argument of succ is not a number");
+                }
+                TyNat
+            }
+            TmPred(t1) => {
+                if !t1.ty(ctx).eqv(&TyNat, ctx) {
+                    panic!("argument of pred is not a number");
+                }
+                TyNat
+            }
+            TmIsZero(t1) => {
+                if !t1.ty(ctx).eqv(&TyNat, ctx) {
+                    panic!("argument of iszero is not a number");
+                }
+                TyNat
+            }
+            TmPack(tyt1, t2, tyt) => {
+                if let TySome(_, tyt2) = tyt.simplify(ctx) {
+                    let tyu = t2.ty(ctx);
+                    let tyv = tyt2.subst_top(tyt1);
+                    if tyu.eqv(&tyv, ctx) {
+                        return tyt.clone();
+                    }
+                    panic!("doesn't match declared type");
+                }
+                panic!("Existential type expected");
+            }
+            TmUnpack(tyx, x, t1, t2) => {
+                if let TySome(_, box tyt11) = t1.ty(ctx).simplify(ctx) {
+                    return ctx.with_binding(tyx.to_string(), TyVarBind, |ctx| {
+                        ctx.with_binding(x.to_string(), VarBind(tyt11), |ctx| t2.ty(ctx).shift(-2))
+                    });
+                }
+                panic!("existential type expected");
+            }
             TmTAbs(tyx, t2) => ctx.with_binding(tyx.to_string(), TyVarBind, |ctx| {
                 let tyt2 = t2.ty(ctx);
                 TyAll(tyx.clone(), box tyt2)
@@ -297,7 +452,6 @@ impl Term {
                     _ => panic!("universal type expected"),
                 }
             }
-            _ => panic!("unimplemented"), // TODO
         }
     }
 
@@ -532,6 +686,12 @@ impl Ty {
         let tyt = rhs.simplify(ctx);
 
         match (&tys, &tyt) {
+            (TyString, TyString) => true,
+            (TyUnit, TyUnit) => true,
+            (TyId(b1), TyId(b2)) => b1 == b2,
+            (TyFloat, TyFloat) => true,
+            (TyBool, TyBool) => true,
+            (TyNat, TyNat) => true,
             (TyVar(_, i), _) if ctx.is_tyabb(*i) => ctx.get_tyabb(*i).eqv(&tyt, ctx),
             (_, TyVar(_, i)) if ctx.is_tyabb(*i) => tys.eqv(&ctx.get_tyabb(*i), ctx),
             (TyVar(_, i), TyVar(_, j)) => i == j,
@@ -541,6 +701,12 @@ impl Ty {
             }
             (TyAll(tyx1, tys2), TyAll(_, tyt2)) => {
                 ctx.with_name(tyx1.to_string(), |ctx| tys2.eqv(&tyt2, ctx))
+            }
+            (TyRecord(fs1), TyRecord(fs2)) => {
+                fs1.len() == fs2.len()
+                    && fs1.iter().all(|(li1, ti1)| {
+                        fs2.iter().any(|(li2, ti2)| li1 == li2 && ti1.eqv(ti2, ctx))
+                    })
             }
             _ => false,
         }
@@ -984,6 +1150,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         csucc = λn:CNat. λX. λs:X->X. λz:X. s (n [X] s z);
         csucc c0;
+        3;
+        succ 3;
+        id [Nat] 5;
     ";
     let (_, cmds) = parser::parse(code)?;
 
