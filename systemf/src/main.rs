@@ -360,6 +360,9 @@ impl Term {
     fn format(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TmAbs(x, tyt1, t2) => write!(f, "λ{}:{}. {}", x, tyt1, t2),
+            TmLet(x, t1, t2) => write!(f, "let {} = {} in {}", x, t1, t2),
+            TmFix(t1) => write!(f, "fix {}", t1),
+            TmIf(t1, t2, t3) => write!(f, "if {} then {} else {}", t1, t2, t3),
             TmUnpack(tyx, x, t1, t2) => write!(f, "let {{{}, {}}} = {} in {}", tyx, x, t1, t2),
             TmTAbs(x, t) => write!(f, "λ{}. {}", x, t),
             _ => self.format_app(f),
@@ -373,9 +376,43 @@ impl Term {
                 write!(f, " ")?;
                 t2.format_atomic(f)
             }
+            TmTimesfloat(t1, t2) => {
+                write!(f, "timesfloat ")?;
+                t1.format_atomic(f)?;
+                write!(f, " ")?;
+                t2.format_atomic(f)
+            }
+            TmPred(t1) => {
+                write!(f, "pred ")?;
+                t1.format_atomic(f)
+            }
+            TmIsZero(t1) => {
+                write!(f, "iszero ")?;
+                t1.format_atomic(f)
+            }
             TmTApp(t, ty) => {
                 t.format_app(f)?;
                 write!(f, " [{}]", ty)
+            }
+            _ => self.format_path(f),
+        }
+    }
+
+    fn format_path(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TmProj(t1, l) => {
+                t1.format_atomic(f)?;
+                write!(f, ".{}", l)
+            }
+            _ => self.format_ascribe(f),
+        }
+    }
+
+    fn format_ascribe(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TmAscribe(t1, tyt1) => {
+                t1.format_app(f)?;
+                write!(f, " as {}", tyt1)
             }
             _ => self.format_atomic(f),
         }
@@ -383,7 +420,41 @@ impl Term {
 
     fn format_atomic(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            TmInert(tyt) => write!(f, "inert[{}]", tyt),
             TmVar(x, _) => write!(f, "{}", x),
+            TmString(s) => write!(f, "\"{}\"", s),
+            TmUnit => write!(f, "unit"),
+            TmTrue => write!(f, "true"),
+            TmFalse => write!(f, "false"),
+            TmFloat(v) => write!(f, "{}", v),
+            TmZero => write!(f, "0"),
+            TmSucc(box t) => {
+                let mut t = t;
+                let mut n = 1;
+                loop {
+                    match t {
+                        TmSucc(s) => {
+                            n += 1;
+                            t = s;
+                        }
+                        TmZero => return write!(f, "{}", n),
+                        _ => {
+                            write!(f, "(succ ",)?;
+                            t.format_atomic(f)?;
+                            return write!(f, ")");
+                        }
+                    }
+                }
+            }
+            TmRecord(fields) => write!(
+                f,
+                "{{{}}}",
+                fields
+                    .iter()
+                    .map(|(li, ti)| format!("{} = {}", li, ti))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             TmPack(tyt1, t2, tyt3) => write!(f, "{{∃{}, {}}} as {}", tyt1, t2, tyt3),
             _ => write!(f, "({})", self),
         }
@@ -511,6 +582,21 @@ impl Ty {
     fn format_atomic(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TyVar(s, _) => write!(f, "{}", s),
+            TyId(b) => write!(f, "{}", b),
+            TyString => write!(f, "String"),
+            TyUnit => write!(f, "Unit"),
+            TyBool => write!(f, "Bool"),
+            TyFloat => write!(f, "Float"),
+            TyNat => write!(f, "Nat"),
+            TyRecord(fields) => write!(
+                f,
+                "{{{}}}",
+                fields
+                    .iter()
+                    .map(|(li, tyti)| format!("{}: {}", li, tyti))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             TySome(tyx, tyt2) => write!(f, "{{∃{}, {}}}", tyx, tyt2),
             _ => write!(f, "({})", self),
         }
