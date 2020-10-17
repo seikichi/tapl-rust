@@ -1,19 +1,24 @@
-plus = fix (λ f: Nat -> Nat -> Nat. λ m: Nat. λ n: Nat. if iszero m then n else succ (f (pred m) n));
-times = fix (λ f: Nat -> Nat -> Nat. λ m: Nat. λ n: Nat. if iszero m then 0 else plus n (f (pred m) n));
-factorial = fix (λ f: Nat -> Nat. λ m: Nat. if iszero m then 1 else times m (f (pred m)));
-factorial 4;
+"hello";
+unit;
+let x = true in x;
+timesfloat 2.0 3.14159;
+λx:Bool. x;
+(λx: Bool->Bool. if x false then true else false) (λx:Bool. if x then false else true);
+λx:Nat. succ x;
+(λx:Nat. succ (succ x)) (succ 0);
 
-counter = λ c: Nat. let v = ref c in {inc=λ u: Unit. (v := succ (!v); !v), dec=λ u: Unit. (v := pred (!v); !v)};
-c1 = counter 10;
-c2 = counter 10;
-c1.inc unit;
-c1.inc unit;
-c1.dec unit;
-c1.inc unit;
-c2.dec unit;
+T = Nat -> Nat;
+λf:T. λx:Nat. f (f x);
 
-s = λ o: <some: Nat, none: Unit>. case o of <some = n> => succ (n) | <none = u> => 0;
-o1 = <some = 10> as <some: Nat, none: Unit>;
-o2 = <none = unit> as <some: Nat, none: Unit>;
-s o1;
-s o2
+λX. λx:X. x;
+(λX. λx:X. x) [∀X.X->X];
+
+{*∀Y.Y, λx:(∀Y.Y). x} as {∃X, X->X};
+
+{x=true, y=false};
+{x=true, y=false}.x;
+{true, false};
+{true, false}.1;
+
+{*Nat, {c=0, f=λx:Nat. succ x}} as {∃X, {c: X, f: X->Nat}};
+let {X, x} = {*Nat, {c=0, f=λx:Nat. succ x}} as {∃X, {c: X, f: X->Nat}} in x.f x.c;

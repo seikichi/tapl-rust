@@ -1,9 +1,9 @@
 #![feature(box_syntax, box_patterns)]
 #![feature(bindings_after_at)]
 
-// use std::env;
+use std::env;
 use std::fmt;
-// use std::fs;
+use std::fs;
 use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1182,37 +1182,104 @@ mod parser {
     }
 }
 
+#[test]
+fn test_eval() {
+    let testcases: Vec<(&str, &str, &str)> = vec![
+        // tests from test.f in original fullpolly code
+        (r#""hello""#, r#""hello""#, "String"),
+        ("unit", "unit", "Unit"),
+        ("let x = true in x", "true", "Bool"),
+        ("timesfloat 2.0 3.14159", "6.28318", "Float"),
+        ("λx:Bool. x", "λx:Bool. x", "Bool -> Bool"),
+        (
+            r#"(λx: Bool->Bool. if x false then true else false) (λx:Bool. if x then false else true)"#,
+            "true",
+            "Bool",
+        ),
+        ("λx:Nat. (succ x)", "λx:Nat. (succ x)", "Nat -> Nat"),
+        ("(λx:Nat. (succ (succ x))) (succ 0)", "3", "Nat"),
+        (
+            "T = Nat -> Nat; λf:T. λx:Nat. f (f x)",
+            "λf:T. λx:Nat. f (f x)",
+            "T -> Nat -> Nat",
+        ),
+        ("λX. λx:X. x", "λX. λx:X. x", "∀X. X -> X"),
+        (
+            "(λX. λx:X. x) [∀X.X -> X]",
+            "λx:∀X. X -> X. x",
+            "(∀X. X -> X) -> (∀X. X -> X)",
+        ),
+        (
+            "{*∀Y. Y, λx:∀Y. Y. x} as {∃X, X -> X}",
+            "{*∀Y. Y, λx:∀Y. Y. x} as {∃X, X -> X}",
+            "{∃X, X -> X}",
+        ),
+        (
+            "{x = true, y = false}",
+            "{x = true, y = false}",
+            "{x: Bool, y: Bool}",
+        ),
+        ("{x = true, y = false}.x", "true", "Bool"),
+        (
+            "{true, false}",
+            "{1 = true, 2 = false}",
+            "{1: Bool, 2: Bool}",
+        ),
+        ("{true, false}.1", "true", "Bool"),
+        (
+            "let {X, x} = {*Nat, {c=0, f=λx:Nat. succ x}} as {∃X, {c: X, f: X->Nat}} in x.f x.c",
+            "1",
+            "Nat",
+        ),
+    ];
+
+    for (input, et, ety) in testcases {
+        let mut at = None;
+        let mut aty = None;
+        let mut ctx = Context::new();
+        let (_, cmds) = parser::parse(input).unwrap();
+
+        for cmd in cmds {
+            match cmd {
+                Eval(t) => {
+                    let t = t.eval(&ctx);
+                    let ty = t.ty(&mut ctx);
+                    at = Some(t);
+                    aty = Some(ty);
+                }
+                Bind(x, bind) => {
+                    let bind = bind.eval(&ctx);
+                    ctx.add_binding(x.to_string(), bind);
+                }
+                SomeBind(tyx, x, t) => {
+                    let tyt = t.ty(&mut ctx);
+                    match tyt.simplify(&ctx) {
+                        TySome(_, box body) => {
+                            let t = t.eval(&ctx);
+                            let b = match t {
+                                TmPack(_, t12, _) => TmAbbBind(t12.shift(1), Some(body.clone())),
+                                _ => VarBind(body.clone()),
+                            };
+                            ctx.add_binding(tyx.to_string(), TyVarBind);
+                            ctx.add_binding(x.to_string(), b);
+                        }
+                        _ => panic!("Existential type expected"),
+                    }
+                }
+            }
+        }
+
+        assert_eq!(et, format!("{}", at.unwrap()));
+        assert_eq!(ety, format!("{}", aty.unwrap()));
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let code = r###"
-    "hello";
-    unit;
-    let x = true in x;
-    timesfloat 2.0 3.14159;
-    λx:Bool. x;
-    (λx: Bool->Bool. if x false then true else false) (λx:Bool. if x then false else true);
-    λx:Nat. succ x;
-    (λx:Nat. succ (succ x)) (succ 0);
+    let args: Vec<String> = env::args().collect();
+    let filename = &args[1];
+    let code = fs::read_to_string(filename)?;
+    let (_, cmds) = parser::parse(&code).unwrap();
 
-    T = Nat -> Nat;
-    λf:T. λx:Nat. f (f x);
-
-    λX. λx:X. x;
-    (λX. λx:X. x) [∀X.X->X];
-
-    {*∀Y.Y, λx:(∀Y.Y). x} as {∃X, X->X};
-
-    {x=true, y=false};
-    {x=true, y=false}.x;
-    {true, false};
-    {true, false}.1;
-
-    {*Nat, {c=0, f=λx:Nat. succ x}} as {∃X, {c: X, f: X->Nat}};
-
-    let {X, x} = {*Nat, {c=0, f=λx:Nat. succ x}} as {∃X, {c: X, f: X->Nat}} in x.f x.c;
-    "###;
-    let (_, cmds) = parser::parse(code)?;
-
-    // eval loop
     let mut ctx = Context::new();
     for cmd in cmds {
         println!("> {}", cmd);
@@ -1228,7 +1295,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{}{}", x, bind);
                 ctx.add_binding(x.to_string(), bind);
             }
-            _ => panic!("Invalid Command: {:?}", cmd),
+            SomeBind(tyx, x, t) => {
+                let tyt = t.ty(&mut ctx);
+                match tyt.simplify(&ctx) {
+                    TySome(_, box body) => {
+                        let t = t.eval(&ctx);
+                        let b = match t {
+                            TmPack(_, t12, _) => TmAbbBind(t12.shift(1), Some(body.clone())),
+                            _ => VarBind(body.clone()),
+                        };
+                        ctx.add_binding(tyx.to_string(), TyVarBind);
+                        ctx.add_binding(x.to_string(), b);
+                        println!("{}: {}", x, body);
+                    }
+                    _ => panic!("Existential type expected"),
+                }
+            }
         }
     }
 
