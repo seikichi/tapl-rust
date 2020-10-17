@@ -738,7 +738,7 @@ impl Ty {
         match self {
             TyArr(tyt1, tyt2) => {
                 tyt1.format_atomic(f)?;
-                write!(f, " -> ")?;
+                write!(f, "->")?;
                 tyt2.format_arrow(f)
             }
             _ => self.format_atomic(f),
@@ -1190,29 +1190,29 @@ fn test_eval() {
         ("unit", "unit", "Unit"),
         ("let x = true in x", "true", "Bool"),
         ("timesfloat 2.0 3.14159", "6.28318", "Float"),
-        ("λx:Bool. x", "λx:Bool. x", "Bool -> Bool"),
+        ("λx:Bool. x", "λx:Bool. x", "Bool->Bool"),
         (
             r#"(λx: Bool->Bool. if x false then true else false) (λx:Bool. if x then false else true)"#,
             "true",
             "Bool",
         ),
-        ("λx:Nat. (succ x)", "λx:Nat. (succ x)", "Nat -> Nat"),
+        ("λx:Nat. (succ x)", "λx:Nat. (succ x)", "Nat->Nat"),
         ("(λx:Nat. (succ (succ x))) (succ 0)", "3", "Nat"),
         (
-            "T = Nat -> Nat; λf:T. λx:Nat. f (f x)",
+            "T = Nat->Nat; λf:T. λx:Nat. f (f x)",
             "λf:T. λx:Nat. f (f x)",
-            "T -> Nat -> Nat",
+            "T->Nat->Nat",
         ),
-        ("λX. λx:X. x", "λX. λx:X. x", "∀X. X -> X"),
+        ("λX. λx:X. x", "λX. λx:X. x", "∀X. X->X"),
         (
-            "(λX. λx:X. x) [∀X.X -> X]",
-            "λx:∀X. X -> X. x",
-            "(∀X. X -> X) -> (∀X. X -> X)",
+            "(λX. λx:X. x) [∀X.X->X]",
+            "λx:∀X. X->X. x",
+            "(∀X. X->X)->(∀X. X->X)",
         ),
         (
-            "{*∀Y. Y, λx:∀Y. Y. x} as {∃X, X -> X}",
-            "{*∀Y. Y, λx:∀Y. Y. x} as {∃X, X -> X}",
-            "{∃X, X -> X}",
+            "{*∀Y. Y, λx:∀Y. Y. x} as {∃X, X->X}",
+            "{*∀Y. Y, λx:∀Y. Y. x} as {∃X, X->X}",
+            "{∃X, X->X}",
         ),
         (
             "{x = true, y = false}",
@@ -1229,6 +1229,46 @@ fn test_eval() {
         (
             "let {X, x} = {*Nat, {c=0, f=λx:Nat. succ x}} as {∃X, {c: X, f: X->Nat}} in x.f x.c",
             "1",
+            "Nat",
+        ),
+        // tests from TAPL ch. 24 & 24.
+        ("id = λX. λx:X. x; id [Nat] 0", "0", "Nat"),
+        (
+            "double = λX. λf:X->X. λa:X. f (f a); double [Nat] (λx:Nat. succ (succ x)) 3",
+            "7",
+            "Nat",
+        ),
+        (
+            "λx:∀X. X->X. x [∀X. X->X] x",
+            "λx:∀X. X->X. x [∀X. X->X] x",
+            "(∀X. X->X)->(∀X. X->X)",
+        ),
+        (
+            "{*Nat, {a = 5, f = λx:Nat. (succ x)}} as {∃X, {a: X, f: X->X}}",
+            "{*Nat, {a = 5, f = λx:Nat. (succ x)}} as {∃X, {a: X, f: X->X}}",
+            "{∃X, {a: X, f: X->X}}",
+        ),
+        (
+            r#"let {X, x} = {*Nat, {a = 0, f = λx:Nat. (succ x)}} as {∃X, {a: X, f: X->X}} in (x.f x.a)"#,
+            "1",
+            "Nat",
+        ),
+        (
+            r#"
+              counter = {*Nat, {new = 1, get = λi:Nat. i, inc = λi:Nat. (succ i)}}
+                as {∃Counter, {new: Counter, get: Counter -> Nat, inc: Counter->Counter}};
+              let {C, c} = counter in c.get (c.inc c.new)
+            "#,
+            "2",
+            "Nat",
+        ),
+        (
+            r#"
+              Counter = {∃X, {state: X, methods: {get: X->Nat, inc: X->X}}};
+              c = {*Nat, {state = 5, methods = {get = λx:Nat. x, inc = λx:Nat. (succ x)}}} as Counter;
+              let {X, body} = c in body.methods.get(body.state);
+            "#,
+            "5",
             "Nat",
         ),
     ];
