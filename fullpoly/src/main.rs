@@ -112,7 +112,10 @@ impl Context {
         match self.get_binding(i) {
             VarBind(ty) => ty,
             TmAbbBind(_, Some(ty)) => ty,
-            _ => panic!("Wrong kind of binding for variable"),
+            _ => panic!(
+                "Wrong kind of binding for variable: {:?}",
+                self.get_binding(i)
+            ),
         }
     }
 
@@ -807,6 +810,19 @@ impl Binding {
             }
         }
     }
+
+    fn check(&self, ctx: &mut Context) -> Self {
+        match self {
+            NameBind | TyVarBind | TyAbbBind(_) | VarBind(_) => self.clone(),
+            TmAbbBind(t, None) => TmAbbBind(t.clone(), Some(t.ty(ctx))),
+            TmAbbBind(t, Some(tyt)) => {
+                if !tyt.eqv(&t.ty(ctx), ctx) {
+                    panic!("Type of binding does not match declared type");
+                }
+                self.clone()
+            }
+        }
+    }
 }
 
 impl fmt::Display for Binding {
@@ -1249,7 +1265,7 @@ fn test_eval() {
             "{∃X, {a: X, f: X->X}}",
         ),
         (
-            r#"let {X, x} = {*Nat, {a = 0, f = λx:Nat. (succ x)}} as {∃X, {a: X, f: X->X}} in (x.f x.a)"#,
+            r#"let {X, x} = {*Nat, {a = 0, f = λx:Nat. (succ x)}} as {∃X, {a: X, f: X->Nat}} in (x.f x.a)"#,
             "1",
             "Nat",
         ),
@@ -1282,12 +1298,13 @@ fn test_eval() {
         for cmd in cmds {
             match cmd {
                 Eval(t) => {
-                    let t = t.eval(&ctx);
                     let ty = t.ty(&mut ctx);
-                    at = Some(t);
+                    let t = t.eval(&ctx);
                     aty = Some(ty);
+                    at = Some(t);
                 }
                 Bind(x, bind) => {
+                    let bind = bind.check(&mut ctx);
                     let bind = bind.eval(&ctx);
                     ctx.add_binding(x.to_string(), bind);
                 }
@@ -1326,11 +1343,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match cmd {
             Eval(t) => {
-                let t = t.eval(&ctx);
                 let ty = t.ty(&mut ctx);
+                let t = t.eval(&ctx);
                 println!("{}: {}", t, ty);
             }
             Bind(x, bind) => {
+                let bind = bind.check(&mut ctx);
                 let bind = bind.eval(&ctx);
                 println!("{}{}", x, bind);
                 ctx.add_binding(x.to_string(), bind);

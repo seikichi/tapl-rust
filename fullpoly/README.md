@@ -31,7 +31,7 @@ snd [Nat] [Bool] p1;
 > double [Nat] (λx:Nat. (succ (succ x))) 3
 7: Nat
 
-> let {X, x} = {*Nat, {a = 0, f = λx:Nat. (succ x)}} as {∃X, {a: X, f: X->X}} in x.f x.a
+> let {X, x} = {*Nat, {a = 0, f = λx:Nat. (succ x)}} as {∃X, {a: X, f: X->Nat}} in x.f x.a
 1: Nat
 
 > counter = {*Nat, {new = 1, get = λi:Nat. i, inc = λi:Nat. (succ i)}} as {∃Counter, {new: Counter, get: Counter->Nat, inc: Counter->Counter}}

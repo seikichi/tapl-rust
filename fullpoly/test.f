@@ -26,7 +26,7 @@ let {X, x} = {*Nat, {c=0, f=λx:Nat. succ x}} as {∃X, {c: X, f: X->Nat}} in x.
 double = λX. λf:X->X. λa:X. f (f a);
 double [Nat] (λx:Nat. succ (succ x)) 3;
 
-let {X, x} = {*Nat, {a = 0, f = λx:Nat. (succ x)}} as {∃X, {a: X, f: X->X}} in (x.f x.a);
+let {X, x} = {*Nat, {a = 0, f = λx:Nat. (succ x)}} as {∃X, {a: X, f: X->Nat}} in (x.f x.a);
 
 counter = {*Nat, {new = 1, get = λi:Nat. i, inc = λi:Nat. (succ i)}}
   as {∃Counter, {new: Counter, get: Counter -> Nat, inc: Counter->Counter}};
