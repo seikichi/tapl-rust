@@ -304,7 +304,7 @@ impl Term {
             TmIsZero(t1) => TmIsZero(box t1.eval1(ctx)?),
             // TmUnpack, TmPack
             TmUnpack(_, _, box TmPack(ty11, v12, _), t2) if v12.is_val(ctx) => {
-                v12.shift(1).subst_top(t2).ty_subst_top(ty11)
+                t2.subst_top(&v12.shift(1)).ty_subst_top(ty11)
             }
             TmUnpack(tyx, x, t1, t2) => {
                 TmUnpack(tyx.clone(), x.clone(), box t1.eval1(ctx)?, t2.clone())
@@ -528,7 +528,7 @@ impl Term {
             TmApp(t1, t2) => {
                 t1.format_app(f)?;
                 write!(f, " ")?;
-                t2.format_atomic(f)
+                t2.format_path(f)
             }
             TmTimesfloat(t1, t2) => {
                 write!(f, "timesfloat ")?;
@@ -583,13 +583,13 @@ impl Term {
             TmFloat(v) => write!(f, "{}", v),
             TmZero => write!(f, "0"),
             TmSucc(box t) => {
-                let mut t = t;
+                let mut u = t;
                 let mut n = 1;
                 loop {
-                    match t {
+                    match u {
                         TmSucc(s) => {
                             n += 1;
-                            t = s;
+                            u = s;
                         }
                         TmZero => return write!(f, "{}", n),
                         _ => {
@@ -609,7 +609,7 @@ impl Term {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            TmPack(tyt1, t2, tyt3) => write!(f, "{{∃{}, {}}} as {}", tyt1, t2, tyt3),
+            TmPack(tyt1, t2, tyt3) => write!(f, "{{*{}, {}}} as {}", tyt1, t2, tyt3),
             _ => write!(f, "({})", self),
         }
     }
@@ -844,7 +844,7 @@ impl fmt::Display for Command {
         match self {
             Eval(t) => t.fmt(f),
             Bind(x, b) => write!(f, "{}{}", x, b),
-            SomeBind(_, _, _) => Ok(()), // TODO
+            SomeBind(tyx, x, t) => write!(f, "{{{}, {}}} = {}", tyx, x, t),
         }
     }
 }
@@ -984,7 +984,7 @@ mod parser {
             map(ucid, |id| TyVar(id, 0)),
             map(
                 delimited(s("{"), separated_list(s(","), field_type_element), s("}")),
-                |fs| TyRecord(fs),
+                |fs| TyRecord(fs.iter().enumerate().map(|(i, f)| f(i + 1)).collect()),
             ),
             map(
                 tuple((s("{"), s("∃"), ucid, s(","), ty, s("}"))),
@@ -993,8 +993,18 @@ mod parser {
         ))(input)
     }
 
-    fn field_type_element(input: &str) -> IResult<&str, (Rc<str>, Ty)> {
-        map(tuple((lcid, s(":"), ty)), |(id, _, ty)| (id, ty))(input)
+    fn field_type_element(input: &str) -> IResult<&str, Box<dyn Fn(usize) -> (Rc<str>, Ty)>> {
+        alt((
+            map(
+                tuple((lcid, s(":"), ty)),
+                |(id, _, ty)| -> Box<dyn Fn(usize) -> (Rc<str>, Ty)> {
+                    box move |_| (id.clone(), ty.clone())
+                },
+            ),
+            map(ty, |ty| -> Box<dyn Fn(usize) -> (Rc<str>, Ty)> {
+                box move |i| (i.to_string().into(), ty.clone())
+            }),
+        ))(input)
     }
 
     fn term(input: &str) -> IResult<&str, Term> {
@@ -1039,6 +1049,21 @@ mod parser {
                 |(_, id, _, ty, _, t1, _, t2)| {
                     TmLet(id.clone(), box TmFix(box TmAbs(id, ty, box t1)), box t2)
                 },
+            ),
+            map(
+                tuple((
+                    s("let"),
+                    s("{"),
+                    ucid,
+                    s(","),
+                    lcid,
+                    s("}"),
+                    s("="),
+                    term,
+                    s("in"),
+                    term,
+                )),
+                |(_, _, ui, _, li, _, _, t1, _, t2)| TmUnpack(ui, li, box t1, box t2),
             ),
         ))(input)
     }
@@ -1123,9 +1148,10 @@ mod parser {
                 |cs| TmString(cs.iter().collect::<String>().into()),
             ),
             map(s("unit"), |_| TmUnit),
-            map(delimited(s("{"), many0(field_element), s("}")), |fields| {
-                TmRecord(fields)
-            }),
+            map(
+                delimited(s("{"), separated_list(s(","), field_element), s("}")),
+                |fields| TmRecord(fields.iter().enumerate().map(|(i, f)| f(i + 1)).collect()),
+            ),
             map(s("true"), |_| TmTrue),
             map(s("false"), |_| TmFalse),
             map(preceded(ms0, recognize_float), |s: &str| {
@@ -1141,8 +1167,18 @@ mod parser {
         ))(input)
     }
 
-    fn field_element(input: &str) -> IResult<&str, (Rc<str>, Term)> {
-        map(tuple((lcid, s("="), term)), |(id, _, t)| (id, t))(input)
+    fn field_element(input: &str) -> IResult<&str, Box<dyn Fn(usize) -> (Rc<str>, Term)>> {
+        alt((
+            map(
+                tuple((lcid, s("="), term)),
+                |(id, _, t)| -> Box<dyn Fn(usize) -> (Rc<str>, Term)> {
+                    box move |_| (id.clone(), t.clone())
+                },
+            ),
+            map(term, |t| -> Box<dyn Fn(usize) -> (Rc<str>, Term)> {
+                box move |i| (i.to_string().into(), t.clone())
+            }),
+        ))(input)
     }
 }
 
@@ -1153,17 +1189,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let x = true in x;
     timesfloat 2.0 3.14159;
     λx:Bool. x;
+    (λx: Bool->Bool. if x false then true else false) (λx:Bool. if x then false else true);
+    λx:Nat. succ x;
+    (λx:Nat. succ (succ x)) (succ 0);
 
-    id = λX. λx:X. x;
-    id [Bool] true;
-    id [Nat] 10;
+    T = Nat -> Nat;
+    λf:T. λx:Nat. f (f x);
 
-    double = λX. λf:X->X. λa:X. f (f a);
-    double [Nat] (id [Nat]) 0;
-    double [Nat] (λx:Nat. succ x) 0;
+    λX. λx:X. x;
+    (λX. λx:X. x) [∀X.X->X];
 
-    quadruple = λX. double [X->X] (double [X]);
-    quadruple [Nat] (λx:Nat. succ x) 0;
+    {*∀Y.Y, λx:(∀Y.Y). x} as {∃X, X->X};
+
+    {x=true, y=false};
+    {x=true, y=false}.x;
+    {true, false};
+    {true, false}.1;
+
+    {*Nat, {c=0, f=λx:Nat. succ x}} as {∃X, {c: X, f: X->Nat}};
+
+    let {X, x} = {*Nat, {c=0, f=λx:Nat. succ x}} as {∃X, {c: X, f: X->Nat}} in x.f x.c;
     "###;
     let (_, cmds) = parser::parse(code)?;
 
