@@ -35,3 +35,10 @@ let {C, c} = counter in c.get (c.inc c.new);
 Counter = {∃X, {state: X, methods: {get: X->Nat, inc: X->X}}};
 c = {*Nat, {state = 5, methods = {get = λx:Nat. x, inc = λx:Nat. (succ x)}}} as Counter;
 let {X, body} = c in body.methods.get(body.state);
+
+pair = λX. λY. λx:X. λy:Y. (λR. λp:X->Y->R. p x y);
+fst = λX. λY. λp:(∀R. (X->Y->R)->R). p [X] (λx:X. λy:Y. x);
+snd = λX. λY. λp:(∀R. (X->Y->R)->R). p [Y] (λx:X. λy:Y. y);
+p1 = pair [Nat] [Bool] 1 true;
+fst [Nat] [Bool] p1;
+snd [Nat] [Bool] p1;
